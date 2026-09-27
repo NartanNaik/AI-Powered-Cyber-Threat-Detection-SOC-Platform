@@ -1,0 +1,211 @@
+{
+  "model_family": "Random Forest Classifier (CIC-IDS2017)",
+  "accuracy": 99.5,
+  "macro_f1": 99.37,
+  "precision": 99.24,
+  "recall": 99.49,
+  "last_trained": "September 27, 2026 - 11:25:53 UTC",
+  "total_samples": 12000,
+  "benchmark_comparison": [
+    {
+      "name": "Random Forest",
+      "type": "Tree Ensemble",
+      "accuracy": 99.5,
+      "macro_f1": 99.37,
+      "precision": 99.24,
+      "recall": 99.49,
+      "latency_us": 16.86,
+      "train_time_s": 0.63,
+      "selected": true
+    },
+    {
+      "name": "Hist Gradient Boosting",
+      "type": "Gradient Boosting",
+      "accuracy": 99.5,
+      "macro_f1": 99.37,
+      "precision": 99.24,
+      "recall": 99.49,
+      "latency_us": 30.12,
+      "train_time_s": 5.34,
+      "selected": false
+    },
+    {
+      "name": "Multi-Layer Perceptron (MLP)",
+      "type": "Deep Neural Network",
+      "accuracy": 99.0,
+      "macro_f1": 98.73,
+      "precision": 98.66,
+      "recall": 98.79,
+      "latency_us": 2.89,
+      "train_time_s": 9.95,
+      "selected": false
+    },
+    {
+      "name": "Logistic Regression",
+      "type": "Linear Baseline",
+      "accuracy": 98.38,
+      "macro_f1": 97.9,
+      "precision": 97.72,
+      "recall": 98.09,
+      "latency_us": 0.73,
+      "train_time_s": 0.25,
+      "selected": false
+    }
+  ],
+  "class_metrics": [
+    {
+      "class": "Benign",
+      "precision": "99.52%",
+      "recall": "99.05%",
+      "f1": "99.28%",
+      "support": "840"
+    },
+    {
+      "class": "Botnet",
+      "precision": "100.00%",
+      "recall": "100.00%",
+      "f1": "100.00%",
+      "support": "120"
+    },
+    {
+      "class": "Brute Force",
+      "precision": "100.00%",
+      "recall": "100.00%",
+      "f1": "100.00%",
+      "support": "288"
+    },
+    {
+      "class": "DDoS",
+      "precision": "100.00%",
+      "recall": "100.00%",
+      "f1": "100.00%",
+      "support": "600"
+    },
+    {
+      "class": "PortScan",
+      "precision": "100.00%",
+      "recall": "100.00%",
+      "f1": "100.00%",
+      "support": "360"
+    },
+    {
+      "class": "Web Attack",
+      "precision": "95.92%",
+      "recall": "97.92%",
+      "f1": "96.91%",
+      "support": "192"
+    }
+  ],
+  "confusion_matrix": {
+    "headers": [
+      "Benign",
+      "Botnet",
+      "Brute Force",
+      "DDoS",
+      "PortScan",
+      "Web Attack"
+    ],
+    "rows": [
+      {
+        "label": "Benign",
+        "values": [
+          832,
+          0,
+          0,
+          0,
+          0,
+          8
+        ]
+      },
+      {
+        "label": "Botnet",
+        "values": [
+          0,
+          120,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "label": "Brute Force",
+        "values": [
+          0,
+          0,
+          288,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "label": "DDoS",
+        "values": [
+          0,
+          0,
+          0,
+          600,
+          0,
+          0
+        ]
+      },
+      {
+        "label": "PortScan",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          360,
+          0
+        ]
+      },
+      {
+        "label": "Web Attack",
+        "values": [
+          4,
+          0,
+          0,
+          0,
+          0,
+          188
+        ]
+      }
+    ]
+  },
+  "top_features": [
+    {
+      "feature": "pkt_len_variance",
+      "importance": 0.1249
+    },
+    {
+      "feature": "bwd_iat_mean",
+      "importance": 0.1027
+    },
+    {
+      "feature": "flow_iat_mean",
+      "importance": 0.0877
+    },
+    {
+      "feature": "fwd_iat_mean",
+      "importance": 0.0804
+    },
+    {
+      "feature": "flow_iat_std",
+      "importance": 0.0729
+    },
+    {
+      "feature": "fwd_header_len",
+      "importance": 0.0649
+    },
+    {
+      "feature": "subflow_fwd_pkts",
+      "importance": 0.064
+    },
+    {
+      "feature": "bwd_pkt_len_mean",
+      "importance": 0.0538
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 font-sans antialiased overflow-x-hidden;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #080d1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* Custom classes */
+.glass-panel {
+  @apply bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl shadow-lg;
+}
+
+.glass-panel-interactive {
+  @apply bg-slate-900/50 backdrop-blur-md border border-slate-800/60 rounded-xl shadow-lg transition-all duration-300 hover:border-slate-700/80 hover:bg-slate-900/70;
+}
+
+/* Custom neon glow indicators */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(0.95);
+  }
+}
+
+.pulse-glow-green {
+  animation: pulse-glow 2s infinite ease-in-out;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
+}
+
+.pulse-glow-red {
+  animation: pulse-glow 1.5s infinite ease-in-out;
+  box-shadow: 0 0 10px rgba(244, 63, 94, 0.4);
+}
+
+@keyframes attack-beam {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-dash {
+  animation: attack-beam 2.5s linear infinite;
+}
+

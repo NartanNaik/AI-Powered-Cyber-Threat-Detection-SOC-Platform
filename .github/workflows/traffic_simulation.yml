@@ -1,0 +1,32 @@
+name: Live Traffic Simulation Replay
+
+on:
+  schedule:
+    # Run once every hour
+    - cron: '0 * * * *'
+  # Allow manual trigger on-demand from the GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  simulate-traffic:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Codebase
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        pip install pandas numpy scikit-learn sqlalchemy psycopg2-binary python-dotenv joblib
+
+    - name: Run Traffic Simulation
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      run: |
+        python src/simulate_live_traffic.py
