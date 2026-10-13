@@ -1,3 +1,4 @@
+python-multipart
 psycopg[binary]
 psycopg2-binary
 fastapi>=0.100.0
