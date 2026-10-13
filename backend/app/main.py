@@ -500,8 +500,3 @@ async def websocket_threats_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-
-
-
-
