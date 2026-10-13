@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Routes, Route, Link, useLocation } from 'react-router-dom';
+import { Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import { 
   LayoutDashboard, 
   ShieldAlert, 
@@ -172,6 +172,10 @@ function App() {
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/models" element={<Models />} />
             <Route path="/settings" element={<Settings />} />
+            
+            {/* Catch-all fallback routes to prevent blank screens */}
+            <Route path="/index.html" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
 
