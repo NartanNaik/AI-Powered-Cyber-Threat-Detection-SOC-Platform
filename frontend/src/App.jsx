@@ -30,8 +30,9 @@ function App() {
 
   // WebSocket Live Push Telemetry
   useEffect(() => {
-    const rawApi = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-    const wsUrl = rawApi.replace(/^https?/, 'ws') + '/ws/threats';
+    const backendHost = 'ai-cyber-threat-backend-k0pz.onrender.com';
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${backendHost}/ws/threats`;
 
     let socket;
     try {
