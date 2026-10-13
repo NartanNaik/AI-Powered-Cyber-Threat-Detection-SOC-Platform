@@ -23,6 +23,13 @@ function App() {
   const [liveToast, setLiveToast] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
 
+  // 1. OUTSMART THE BROWSER CACHE: Save the current active tab to session memory
+  useEffect(() => {
+    if (location.pathname !== '/index.html') {
+      sessionStorage.setItem('soc_last_route', location.pathname + location.search);
+    }
+  }, [location.pathname, location.search]);
+
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
@@ -173,8 +180,8 @@ function App() {
             <Route path="/models" element={<Models />} />
             <Route path="/settings" element={<Settings />} />
             
-            {/* Catch-all fallback routes to prevent blank screens */}
-            <Route path="/index.html" element={<Navigate to="/" replace />} />
+            {/* 2. RECOVERY ROUTE: If browser forces index.html, load the tab from memory instead */}
+            <Route path="/index.html" element={<Navigate to={sessionStorage.getItem('soc_last_route') || '/'} replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
