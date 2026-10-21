@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Filter, Search, ChevronLeft, ChevronRight, ShieldAlert, UploadCloud } from 'lucide-react';
+import { Filter, Search, ChevronLeft, ChevronRight, ShieldAlert, UploadCloud, ShieldCheck } from 'lucide-react';
 
 import Loader from '../components/Loader';
 import EmptyState from '../components/EmptyState';
@@ -71,6 +71,13 @@ const Alerts = ({ showOnlyAttacks = false }) => {
 
   useEffect(() => {
     fetchThreats();
+    
+    // NEW: Listen for WebSocket Live Events triggered by App.jsx
+    // This instantly reloads the table when the IPS auto-blocks a threat
+    const handleLiveEvent = () => fetchThreats();
+    window.addEventListener('soc-threat-created', handleLiveEvent);
+    
+    return () => window.removeEventListener('soc-threat-created', handleLiveEvent);
   }, [page, severity, attackType, status, debouncedSearch, showOnlyAttacks]);
 
   // Reset page to 1 when filters change
@@ -241,10 +248,18 @@ const Alerts = ({ showOnlyAttacks = false }) => {
                       </span>
                     </td>
                     <td className="py-3 px-4 font-mono text-slate-400">{(threat.confidence * 100).toFixed(0)}%</td>
+                    
+                    {/* NEW: IPS Auto-Containment Indicator */}
                     <td className="py-3 px-4">
-                      <span className={`px-2 py-0.5 rounded-md text-xs font-bold border ${getStatusBadge(threat.status)}`}>
-                        {threat.status}
-                      </span>
+                      {threat.is_blocked ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-bold border bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
+                          <ShieldCheck className="w-3.5 h-3.5" /> Auto-Blocked
+                        </span>
+                      ) : (
+                        <span className={`px-2 py-0.5 rounded-md text-xs font-bold border ${getStatusBadge(threat.status)}`}>
+                          {threat.status}
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}

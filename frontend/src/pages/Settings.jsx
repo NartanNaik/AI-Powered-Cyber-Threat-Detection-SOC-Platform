@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { Settings as SettingsIcon, Sliders, Shield, Save } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Settings as SettingsIcon, Sliders, Shield, Save, ShieldAlert } from 'lucide-react';
 
 const Settings = () => {
+  // Existing Local Storage Settings
   const [threshold, setThreshold] = useState(() => {
     return parseInt(localStorage.getItem('soc_threshold') || '85', 10);
   });
@@ -13,6 +14,25 @@ const Settings = () => {
   });
   const [saved, setSaved] = useState(false);
 
+  // New IPS Auto-Containment Settings
+  const [ipsActive, setIpsActive] = useState(false);
+  const [ipsLoading, setIpsLoading] = useState(true);
+
+  // Fetch initial IPS state from the FastAPI backend when the page loads
+  useEffect(() => {
+    fetch('https://ai-cyber-threat-backend-k0pz.onrender.com/config/ips')
+      .then(res => res.json())
+      .then(data => {
+        setIpsActive(data.ips_mode_active);
+        setIpsLoading(false);
+      })
+      .catch(err => {
+        console.error("Failed to fetch IPS settings", err);
+        setIpsLoading(false);
+      });
+  }, []);
+
+  // Handle saving the local UI settings (threshold, polling, api)
   const handleSave = (e) => {
     e.preventDefault();
     localStorage.setItem('soc_threshold', threshold.toString());
@@ -26,8 +46,24 @@ const Settings = () => {
     setTimeout(() => setSaved(false), 2500);
   };
 
+  // Handle toggling the IPS automation engine on the backend server
+  const toggleIpsMode = async () => {
+    setIpsLoading(true);
+    const newState = !ipsActive;
+    try {
+      await fetch(`https://ai-cyber-threat-backend-k0pz.onrender.com/config/ips?active=${newState}`, {
+        method: 'POST'
+      });
+      setIpsActive(newState);
+    } catch (error) {
+      console.error("Error updating IPS settings", error);
+    } finally {
+      setIpsLoading(false);
+    }
+  };
+
   return (
-    <div className="space-y-6 max-w-xl">
+    <div className="space-y-8 max-w-2xl">
       
       {/* Title */}
       <div>
@@ -35,11 +71,51 @@ const Settings = () => {
           <SettingsIcon className="w-5 h-5 text-slate-400" />
           <span>System Settings</span>
         </h1>
-        <p className="text-xs text-slate-400 mt-1">Configure threshold bounds, polling rates, and backend API routes.</p>
+        <p className="text-xs text-slate-400 mt-1">Configure threat containment rules, threshold bounds, and backend endpoints.</p>
       </div>
 
-      <div className="glass-panel p-6 bg-slate-900/40">
-        <form onSubmit={handleSave} className="space-y-5">
+      {/* NEW: IPS Auto-Containment Toggle Block */}
+      <div className="glass-panel p-6 bg-slate-900 border border-slate-800 rounded-xl relative overflow-hidden">
+        <div className="flex justify-between items-start mb-5">
+          <div>
+            <h3 className="text-lg font-semibold text-slate-200">Defense Operations Mode</h3>
+            <p className="text-xs text-slate-400 mt-1">Configure automated firewall response and active threat containment.</p>
+          </div>
+          <div className={`p-2.5 rounded-lg ${ipsActive ? 'bg-rose-500/20' : 'bg-emerald-500/20'}`}>
+            {ipsActive ? <ShieldAlert className="w-6 h-6 text-rose-500" /> : <Shield className="w-6 h-6 text-emerald-500" />}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between p-4 bg-slate-950 rounded-lg border border-slate-800 shadow-inner">
+          <div>
+            <p className="font-semibold text-sm text-slate-200">IPS Auto-Containment</p>
+            <p className="text-[10px] text-slate-500 mt-1">Automatically execute firewall blocks for critical/high severity threats without human intervention.</p>
+          </div>
+          
+          <button 
+            onClick={toggleIpsMode}
+            disabled={ipsLoading}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none shrink-0 ${ipsActive ? 'bg-rose-500' : 'bg-slate-700'} ${ipsLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${ipsActive ? 'translate-x-6' : 'translate-x-1'}`} />
+          </button>
+        </div>
+
+        {ipsActive && (
+          <div className="mt-4 p-3 bg-rose-950/30 border border-rose-900/50 rounded-lg flex items-start gap-2 animate-pulse">
+            <span className="w-2 h-2 rounded-full bg-rose-500 mt-1 shrink-0"></span>
+            <span className="text-xs text-rose-300 leading-tight">
+              <strong>WARNING:</strong> Active Defense Mode enabled. The AI engine is authorized to instantly drop incoming packets from network IP addresses categorized as highly malicious.
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* EXISTING: Dashboard UI Settings Block */}
+      <div className="glass-panel p-6 bg-slate-900/40 rounded-xl border border-slate-800/50">
+        <h3 className="text-sm font-semibold text-slate-200 mb-5 border-b border-slate-800 pb-2">Dashboard Interface Parameters</h3>
+        
+        <form onSubmit={handleSave} className="space-y-6">
           
           {/* Threshold slider */}
           <div className="space-y-2">
@@ -70,7 +146,7 @@ const Settings = () => {
               max="60"
               value={interval}
               onChange={(e) => setIntervalVal(parseInt(e.target.value || '1', 10))}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-slate-700"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-slate-700 transition-colors"
             />
             <span className="text-[10px] text-slate-500 block">Rate at which the dashboard pulls active logs from the server database (default is 10s).</span>
           </div>
@@ -84,19 +160,19 @@ const Settings = () => {
               type="text"
               value={apiUrl}
               onChange={(e) => setApiUrl(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-slate-700 font-mono"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-slate-700 font-mono transition-colors"
             />
             <span className="text-[10px] text-slate-500 block">Target server endpoint where threat logs are hosted.</span>
           </div>
 
           {/* Save Button */}
-          <div className="pt-2">
+          <div className="pt-2 border-t border-slate-800/80">
             <button
               type="submit"
-              className="w-full bg-emerald-600 hover:bg-emerald-500 text-slate-100 px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md"
+              className="w-full mt-4 bg-emerald-600 hover:bg-emerald-500 text-slate-100 px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md"
             >
               <Save className="w-4 h-4" />
-              <span>{saved ? "Settings Applied!" : "Save Modifications"}</span>
+              <span>{saved ? "Settings Applied!" : "Save Dashboard Modifications"}</span>
             </button>
           </div>
 

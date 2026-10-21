@@ -5,6 +5,10 @@ class Threat(Base):
     __tablename__ = "threats"
 
     id = Column(Integer, primary_key=True, index=True)
+    
+    # Multi-tenant isolation: binds each telemetry log to a specific user/agent
+    api_key = Column(String(100), nullable=True, index=True, default="default")
+
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     source_ip = Column(String(50), nullable=False)
     destination_ip = Column(String(50), nullable=False)
@@ -27,4 +31,3 @@ class Threat(Base):
     
     # Store CIC-IDS network flow features as JSON object
     features = Column(JSON, nullable=True)
-
