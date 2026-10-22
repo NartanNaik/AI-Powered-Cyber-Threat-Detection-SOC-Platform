@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Routes, Route, Link, useLocation, Navigate, useNavigate } from 'react-router-dom';
 import { 
   LayoutDashboard, 
@@ -10,7 +10,9 @@ import {
   Clock,
   Mail,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  RotateCcw,
+  BookOpen
 } from 'lucide-react';
 
 import Overview from './pages/Overview';
@@ -21,6 +23,13 @@ import Settings from './pages/Settings';
 import OnboardingPage from './pages/OnboardingPage';
 import LoginModal from './components/LoginModal';
 import SplashScreen, { CyberCubeLogo } from './components/SplashScreen';
+import Tour from './components/Tour';
+import { isSetupComplete } from './utils/setupState';
+
+const BACKEND_HOST = 'ai-cyber-threat-backend-k0pz.onrender.com';
+
+// Tour "already seen" flag is stored per user so each new account gets the walkthrough once.
+const getTourKey = () => `soc_tour_seen:${sessionStorage.getItem('soc_user_email') || 'anonymous'}`;
 
 // Inline SVGs for brand icons to bypass Lucide's removal of trademarked logos
 const GithubIcon = ({ className }) => (
@@ -45,12 +54,32 @@ function App() {
   // Auth & Route States
   const [isAuthenticated, setIsAuthenticated] = useState(!!sessionStorage.getItem('soc_session_token'));
   const [time, setTime] = useState(new Date());
-  const [liveToast, setLiveToast] = useState(null);
-  const [wsConnected, setWsConnected] = useState(false);
+  const [toast, setToast] = useState(null); // { text, tone: 'alert' | 'info' }
+  const [streamKey, setStreamKey] = useState(0); // bumping this reconnects the WebSocket
   
-  // New States for Splash Screen and Sidebar
+  // Splash Screen, Sidebar, Tour and Reset states
   const [isAppLoading, setIsAppLoading] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isTourOpen, setIsTourOpen] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+
+  const toastTimer = useRef(null);
+  const resetTimer = useRef(null);
+
+  // Evaluated on every render (cheap localStorage read), so a refresh can never bypass setup.
+  const setupDone = isSetupComplete();
+
+  const showToast = useCallback((text, tone = 'alert', durationMs = 6000) => {
+    clearTimeout(toastTimer.current);
+    setToast({ text, tone });
+    toastTimer.current = setTimeout(() => setToast(null), durationMs);
+  }, []);
+
+  // Clean up timers on unmount
+  useEffect(() => () => {
+    clearTimeout(toastTimer.current);
+    clearTimeout(resetTimer.current);
+  }, []);
 
   // Splash Screen Timer
   useEffect(() => {
@@ -72,32 +101,45 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // WebSocket Live Push Telemetry
+  // Launch the tour once, right after setup is finished, on the main console.
+  useEffect(() => {
+    if (!isAuthenticated || !setupDone || isAppLoading) return;
+    if (location.pathname === '/onboarding') return;
+
+    let seen = false;
+    try { seen = !!localStorage.getItem(getTourKey()); } catch (e) { /* storage unavailable */ }
+    if (seen) return;
+
+    const timer = setTimeout(() => setIsTourOpen(true), 700);
+    return () => clearTimeout(timer);
+  }, [isAuthenticated, setupDone, isAppLoading, location.pathname]);
+
+  const closeTour = useCallback(() => {
+    setIsTourOpen(false);
+    try { localStorage.setItem(getTourKey(), '1'); } catch (e) { /* storage unavailable */ }
+  }, []);
+
+  // WebSocket Live Push Telemetry (re-runs when the user restarts the stream)
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    const backendHost = 'ai-cyber-threat-backend-k0pz.onrender.com';
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     
     // Inject the isolated tenant key into the WebSocket connection
     const tenantKey = sessionStorage.getItem('soc_tenant_key') || 'default';
-    const wsUrl = `${wsProtocol}//${backendHost}/ws/threats?api_key=${tenantKey}`;
+    const wsUrl = `${wsProtocol}//${BACKEND_HOST}/ws/threats?api_key=${encodeURIComponent(tenantKey)}`;
 
     let socket;
     try {
       socket = new WebSocket(wsUrl);
-      socket.onopen = () => setWsConnected(true);
-      socket.onclose = () => setWsConnected(false);
       socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'pcap_analysis_completed') {
-            setLiveToast(`PCAP Ingestion: ${data.threats_count} threats detected in ${data.filename}`);
-            setTimeout(() => setLiveToast(null), 6000);
+            showToast(`PCAP Ingestion: ${data.threats_count} threats detected in ${data.filename}`);
             window.dispatchEvent(new CustomEvent('soc-threat-created'));
           } else if (data.type === 'new_threat') {
-            setLiveToast(`Live Threat Detected: [${data.threat?.attack_type}] from ${data.threat?.source_ip}`);
-            setTimeout(() => setLiveToast(null), 6000);
+            showToast(`Live Threat Detected: [${data.threat?.attack_type}] from ${data.threat?.source_ip}`);
             window.dispatchEvent(new CustomEvent('soc-threat-created'));
           }
         } catch (e) {
@@ -108,60 +150,96 @@ function App() {
       console.warn("WebSocket initialization fallback");
     }
     return () => { if (socket) socket.close(); };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, streamKey, showToast]);
+
+  // "Reset Statistics": simulates restarting the data stream (reconnects the socket and tells pages to refetch)
+  const handleResetStatistics = useCallback(() => {
+    if (isResetting) return;
+    setIsResetting(true);
+    showToast('Restarting data stream...', 'info', 4000);
+    setStreamKey((k) => k + 1);
+    window.dispatchEvent(new CustomEvent('soc-stats-reset'));
+
+    resetTimer.current = setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('soc-threat-created'));
+      showToast('Statistics reset. Data stream restarted.', 'info', 3500);
+      setIsResetting(false);
+    }, 1200);
+  }, [isResetting, showToast]);
 
   const navItems = [
-    { name: 'Overview', path: '/', icon: LayoutDashboard },
-    { name: 'Alerts', path: '/alerts', icon: ShieldAlert },
-    { name: 'Logs', path: '/logs', icon: FileText },
-    { name: 'Analytics', path: '/analytics', icon: BarChart3 },
-    { name: 'Models (AI)', path: '/models', icon: Cpu },
-    { name: 'Settings', path: '/settings', icon: SettingsIcon },
+    { name: 'Overview', path: '/', icon: LayoutDashboard, tour: 'nav-overview' },
+    { name: 'Alerts', path: '/alerts', icon: ShieldAlert, tour: 'nav-alerts' },
+    { name: 'Logs', path: '/logs', icon: FileText, tour: 'nav-logs' },
+    { name: 'Analytics', path: '/analytics', icon: BarChart3, tour: 'nav-analytics' },
+    { name: 'Models (AI)', path: '/models', icon: Cpu, tour: 'nav-models' },
+    { name: 'Settings', path: '/settings', icon: SettingsIcon, tour: 'nav-settings' },
   ];
 
   const formatClock = (date) => {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   };
 
-  const handleLoginSuccess = (userData) => {
+  const handleLoginSuccess = () => {
     setIsAuthenticated(true);
-    if (userData.isNewUser) {
-      navigate('/onboarding');
+    // Anyone who has not finished setup always lands in onboarding, new account or not.
+    if (!isSetupComplete()) {
+      navigate('/onboarding', { replace: true });
     } else {
-      const lastRoute = sessionStorage.getItem('soc_last_route') || '/';
-      navigate(lastRoute);
+      navigate(sessionStorage.getItem('soc_last_route') || '/', { replace: true });
     }
   };
 
+  // ---------------------------------------------------------------------
+  // Render gates (all hooks are above this line)
+  // ---------------------------------------------------------------------
   if (isAppLoading) {
     return <SplashScreen />;
   }
 
-  if (location.pathname === '/onboarding') {
+  // Signed-out: show only the login modal. No pages mount, so nothing is fetched for the "default" tenant.
+  if (!isAuthenticated) {
     return (
-      <>
-        {!isAuthenticated && (
-          <LoginModal isOpen={!isAuthenticated} onLoginSuccess={handleLoginSuccess} />
-        )}
-        <Routes>
-          <Route path="/onboarding" element={<OnboardingPage />} />
-        </Routes>
-      </>
+      <div className="flex h-screen bg-slate-950 text-slate-100 font-sans">
+        <LoginModal isOpen={true} onLoginSuccess={handleLoginSuccess} />
+      </div>
     );
   }
 
+  // Onboarding route: only reachable while setup is incomplete.
+  if (location.pathname === '/onboarding') {
+    if (setupDone) {
+      return <Navigate to={sessionStorage.getItem('soc_last_route') || '/'} replace />;
+    }
+    return (
+      <Routes>
+        <Route path="/onboarding" element={<OnboardingPage />} />
+      </Routes>
+    );
+  }
+
+  // Strict gate: signed in but setup not finished means every other URL (including after a reload) is sent to onboarding.
+  if (!setupDone) {
+    return <Navigate to="/onboarding" replace />;
+  }
+
+  const controlButtonClass = `flex items-center rounded-lg border border-slate-800 bg-slate-950/40 text-xs font-semibold text-slate-300 transition-colors hover:border-slate-700 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-60 ${
+    isSidebarOpen ? 'w-full px-3 py-2 gap-3' : 'p-2.5 justify-center'
+  }`;
+
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden text-slate-100 font-sans relative">
-      
-      {!isAuthenticated && (
-        <LoginModal isOpen={!isAuthenticated} onLoginSuccess={handleLoginSuccess} />
-      )}
+
+      {/* Guided tour */}
+      <Tour isOpen={isTourOpen} onClose={closeTour} onComplete={closeTour} />
 
       {/* Collapsible Sidebar */}
       <aside className={`relative bg-slate-900 border-r border-slate-800 flex flex-col justify-between shrink-0 transition-all duration-300 ease-in-out z-20 ${isSidebarOpen ? 'w-64' : 'w-20'}`}>
         
         <button 
+          type="button"
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+          aria-label={isSidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
           className="absolute -right-3 top-14 bg-slate-800 border border-slate-700 rounded-full p-1 text-slate-400 hover:text-emerald-400 hover:bg-slate-900 shadow-lg transition-colors z-30"
         >
           {isSidebarOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
@@ -172,7 +250,7 @@ function App() {
             <div className="w-8 h-8 shrink-0 rounded-lg bg-emerald-600 flex items-center justify-center text-slate-100 shadow shadow-emerald-500/20">
               <CyberCubeLogo className="w-5 h-5 text-slate-100" />
             </div>
-            <div className={`transition-opacity duration-300 ${!isSidebarOpen && 'opacity-0 hidden'}`}>
+            <div className={`transition-opacity duration-300 ${isSidebarOpen ? '' : 'opacity-0 hidden'}`}>
               <h1 className="text-sm font-bold tracking-wider text-slate-100 uppercase">CyberCube</h1>
               <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest leading-none mt-0.5">SOC Monitor</p>
             </div>
@@ -186,6 +264,7 @@ function App() {
                 <Link
                   key={item.name}
                   to={item.path}
+                  data-tour={item.tour}
                   title={!isSidebarOpen ? item.name : ""}
                   className={`flex items-center rounded-lg text-xs font-semibold tracking-wide transition-all group relative overflow-hidden ${
                     isSidebarOpen ? 'px-4 py-2.5 gap-3.5' : 'p-2.5 justify-center'
@@ -196,7 +275,7 @@ function App() {
                   }`}
                 >
                   <Icon className={`w-4 h-4 shrink-0 transition-transform duration-200 group-hover:scale-105 ${isActive ? 'text-emerald-400' : 'text-slate-400 group-hover:text-slate-300'}`} />
-                  <span className={`whitespace-nowrap transition-opacity duration-200 ${!isSidebarOpen && 'hidden'}`}>
+                  <span className={`whitespace-nowrap transition-opacity duration-200 ${isSidebarOpen ? '' : 'hidden'}`}>
                     {item.name}
                   </span>
                   {isActive && (
@@ -209,24 +288,57 @@ function App() {
         </div>
 
         {/* Sidebar Footer */}
-        <div className={`p-4 border-t border-slate-800/80 bg-slate-950/20 flex flex-col gap-3 ${!isSidebarOpen && 'items-center'}`}>
-          <div className={`text-[9px] uppercase font-bold text-slate-500 tracking-wider transition-opacity ${!isSidebarOpen && 'hidden'}`}>
+        <div className={`p-4 border-t border-slate-800/80 bg-slate-950/20 flex flex-col gap-3 ${isSidebarOpen ? '' : 'items-center'}`}>
+
+          {/* Controls */}
+          <div className={`flex flex-col gap-2 ${isSidebarOpen ? 'w-full' : 'items-center'}`}>
+            <div className={`text-[9px] uppercase font-bold text-slate-500 tracking-wider ${isSidebarOpen ? '' : 'hidden'}`}>
+              Controls
+            </div>
+
+            <button
+              type="button"
+              data-tour="reset-stats"
+              onClick={handleResetStatistics}
+              disabled={isResetting}
+              title={!isSidebarOpen ? 'Reset Statistics' : 'Restart the live data stream'}
+              className={controlButtonClass}
+            >
+              <RotateCcw className={`w-4 h-4 shrink-0 ${isResetting ? 'animate-spin text-emerald-400' : ''}`} />
+              <span className={`whitespace-nowrap ${isSidebarOpen ? '' : 'hidden'}`}>
+                {isResetting ? 'Restarting...' : 'Reset Statistics'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              data-tour="setup-guide"
+              onClick={() => setIsTourOpen(true)}
+              title={!isSidebarOpen ? 'Show Setup Guide' : 'Replay the guided tour'}
+              className={controlButtonClass}
+            >
+              <BookOpen className="w-4 h-4 shrink-0" />
+              <span className={`whitespace-nowrap ${isSidebarOpen ? '' : 'hidden'}`}>Show Setup Guide</span>
+            </button>
+          </div>
+
+          <div className={`text-[9px] uppercase font-bold text-slate-500 tracking-wider transition-opacity ${isSidebarOpen ? '' : 'hidden'}`}>
             Network
           </div>
           
           <a href="mailto:naiknartana@gmail.com" title={!isSidebarOpen ? "Email" : ""} className="flex items-center gap-3 text-slate-400 hover:text-emerald-400 transition-colors group">
             <Mail className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
-            <span className={`text-xs font-semibold whitespace-nowrap ${!isSidebarOpen && 'hidden'}`}>Email Developer</span>
+            <span className={`text-xs font-semibold whitespace-nowrap ${isSidebarOpen ? '' : 'hidden'}`}>Email Developer</span>
           </a>
 
           <a href="https://github.com/NartanNaik" target="_blank" rel="noreferrer" title={!isSidebarOpen ? "GitHub" : ""} className="flex items-center gap-3 text-slate-400 hover:text-emerald-400 transition-colors group">
             <GithubIcon className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
-            <span className={`text-xs font-semibold whitespace-nowrap ${!isSidebarOpen && 'hidden'}`}>Developer GitHub</span>
+            <span className={`text-xs font-semibold whitespace-nowrap ${isSidebarOpen ? '' : 'hidden'}`}>Developer GitHub</span>
           </a>
           
           <a href="https://linkedin.com/in/nartan-naik-90499a359" target="_blank" rel="noreferrer" title={!isSidebarOpen ? "LinkedIn" : ""} className="flex items-center gap-3 text-slate-400 hover:text-emerald-400 transition-colors group">
             <LinkedinIcon className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
-            <span className={`text-xs font-semibold whitespace-nowrap ${!isSidebarOpen && 'hidden'}`}>Connect on LinkedIn</span>
+            <span className={`text-xs font-semibold whitespace-nowrap ${isSidebarOpen ? '' : 'hidden'}`}>Connect on LinkedIn</span>
           </a>
         </div>
       </aside>
@@ -234,7 +346,7 @@ function App() {
       {/* Main Panel */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 relative z-10">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3" data-tour="system-status">
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
@@ -244,14 +356,21 @@ function App() {
             </span>
           </div>
 
-          {liveToast && (
-            <div className="absolute left-1/2 -translate-x-1/2 bg-rose-950/90 border border-rose-500/40 text-rose-200 px-4 py-1.5 rounded-full text-xs font-semibold shadow-lg shadow-rose-950/50 flex items-center gap-2 animate-bounce">
-              <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping"></span>
-              <span>{liveToast}</span>
+          {toast && (
+            <div
+              role="status"
+              className={`absolute left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full text-xs font-semibold shadow-lg flex items-center gap-2 ${
+                toast.tone === 'info'
+                  ? 'bg-emerald-950/90 border border-emerald-500/40 text-emerald-200 shadow-emerald-950/50'
+                  : 'bg-rose-950/90 border border-rose-500/40 text-rose-200 shadow-rose-950/50 animate-bounce'
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full animate-ping ${toast.tone === 'info' ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
+              <span>{toast.text}</span>
             </div>
           )}
           
-          <div className="flex items-center gap-4 text-xs font-semibold text-slate-400 bg-slate-950/40 border border-slate-800 px-4 py-2 rounded-lg">
+          <div className="flex items-center gap-4 text-xs font-semibold text-slate-400 bg-slate-950/40 border border-slate-800 px-4 py-2 rounded-lg" data-tour="clock">
             <Clock className="w-4 h-4 text-slate-500" />
             <span className="font-mono tracking-wider">{formatClock(time)}</span>
             <span className="text-slate-600">|</span>

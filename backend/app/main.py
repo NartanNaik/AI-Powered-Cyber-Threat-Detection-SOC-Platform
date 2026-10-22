@@ -1,27 +1,37 @@
 import os
+import re
 import sys
+import json
+import time
+import hmac
 import uuid
+import base64
 import secrets
+import hashlib
+import logging
 import platform
 import subprocess
-import hashlib
+from urllib.parse import quote
+
+import requests as http_requests
 from pydantic import BaseModel
 from fastapi import (
-    FastAPI, 
-    Depends, 
-    HTTPException, 
-    Query, 
-    UploadFile, 
-    File, 
-    Response, 
-    WebSocket, 
-    WebSocketDisconnect, 
+    FastAPI,
+    Depends,
+    HTTPException,
+    Query,
+    UploadFile,
+    File,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
     Header
 )
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import Column, Integer, String, DateTime
 from sqlalchemy import func, and_, or_, desc, asc, case
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 
 # Google OAuth Imports
@@ -36,14 +46,51 @@ if PROJECT_ROOT not in sys.path:
 from .database import get_db, Base, engine
 from .models import Threat
 from .schemas import (
-    ThreatResponse, 
+    ThreatResponse,
     PaginatedThreatResponse,
-    ThreatSummary, 
-    ThreatTrendItem, 
+    ThreatSummary,
+    ThreatTrendItem,
     ThreatDistributionItem,
     ThreatUpdate,
     ModelMetricsResponse
 )
+
+logger = logging.getLogger("cybercube")
+
+# ---------------------------------------------------------------------------
+# Server configuration (all secrets live in environment variables only)
+# ---------------------------------------------------------------------------
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+
+SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
+if not SESSION_SECRET:
+    # Fallback keeps the server usable, but sessions will not survive a restart.
+    SESSION_SECRET = secrets.token_hex(32)
+    logger.warning("SESSION_SECRET is not set; using an ephemeral secret. Sessions reset on every restart.")
+SESSION_TTL_SECONDS = 12 * 60 * 60
+
+# Optional: when set, tenant keys are derived with HMAC so they cannot be computed from an email alone.
+# NOTE: enabling this changes every existing user's tenant key.
+TENANT_KEY_SECRET = os.getenv("TENANT_KEY_SECRET", "").strip()
+
+OPENROUTER_API = "https://openrouter.ai/api/v1"
+
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()] or ["*"]
+
+
+# ---------------------------------------------------------------------------
+# Database model for provisioned OpenRouter keys.
+# Only OpenRouter's key *hash* (an identifier) is stored, never the key itself.
+# Defined before create_all so the table is created with the rest of the schema.
+# ---------------------------------------------------------------------------
+class OpenRouterKeyRecord(Base):
+    __tablename__ = "openrouter_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    key_hash = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
@@ -51,39 +98,43 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(
     title="AI Cyber Threat Detection Platform API",
     description="Multi-tenant SOC-style backend for monitoring and analyzing simulated network threats.",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 # Global Configuration for IPS Auto-Containment
 class SystemConfig:
     ips_mode_active: bool = False
 
-# WebSocket Connection Manager for Real-Time Threat Broadcasting
+# WebSocket Connection Manager for Real-Time Threat Broadcasting (tenant-scoped)
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.active_connections: List[Tuple[WebSocket, str]] = []
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, tenant_key: str):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        self.active_connections.append((websocket, tenant_key))
 
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+        self.active_connections = [
+            (ws, key) for (ws, key) in self.active_connections if ws is not websocket
+        ]
 
-    async def broadcast(self, message: dict):
-        for connection in list(self.active_connections):
+    async def broadcast(self, message: dict, tenant_key: str):
+        """Send a message only to sockets that belong to the given tenant."""
+        for websocket, key in list(self.active_connections):
+            if key != tenant_key:
+                continue
             try:
-                await connection.send_json(message)
+                await websocket.send_json(message)
             except Exception:
-                self.disconnect(connection)
+                self.disconnect(websocket)
 
 manager = ConnectionManager()
 
 # Enable CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,6 +146,78 @@ def get_tenant_key(
 ) -> str:
     """Extracts tenant API key from request header or query parameter, defaulting to 'default'."""
     return x_api_key or api_key or "default"
+
+
+# ---------------------------------------------------------------------------
+# Session tokens (HMAC-signed, expiring) so protected endpoints can trust the caller
+# ---------------------------------------------------------------------------
+def _b64encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def create_session_token(email: str) -> str:
+    payload = json.dumps(
+        {"email": email, "exp": int(time.time()) + SESSION_TTL_SECONDS},
+        separators=(",", ":")
+    ).encode("utf-8")
+    signature = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+    return f"{_b64encode(payload)}.{_b64encode(signature)}"
+
+
+def verify_session_token(token: str) -> Optional[str]:
+    """Returns the email inside a valid, unexpired token, otherwise None."""
+    try:
+        payload_part, signature_part = token.split(".", 1)
+        payload = _b64decode(payload_part)
+        signature = _b64decode(signature_part)
+        expected = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        data = json.loads(payload)
+        if int(data.get("exp", 0)) < int(time.time()):
+            return None
+        email = data.get("email")
+        return email if isinstance(email, str) and email else None
+    except Exception:
+        return None
+
+
+def get_current_email(authorization: Optional[str] = Header(None)) -> str:
+    """FastAPI dependency: resolves the signed-in user's email from the Bearer session token."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing session token. Please sign in again.")
+    email = verify_session_token(authorization[7:].strip())
+    if not email:
+        raise HTTPException(status_code=401, detail="Session expired or invalid. Please sign in again.")
+    return email
+
+
+def derive_tenant_key(email: str) -> str:
+    """Consistent per-user tenant key. HMAC-based when TENANT_KEY_SECRET is configured."""
+    if TENANT_KEY_SECRET:
+        digest = hmac.new(
+            TENANT_KEY_SECRET.encode("utf-8"),
+            email.strip().lower().encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()[:16]
+    else:
+        digest = hashlib.sha256(email.encode()).hexdigest()[:16]
+    return f"soc_live_{digest}"
+
+
+def get_owned_threat(db: Session, threat_id: int, tenant_key: str, label: str = "Threat") -> Threat:
+    """Fetch a threat only if it belongs to the calling tenant."""
+    threat = db.query(Threat).filter(
+        and_(Threat.id == threat_id, Threat.api_key == tenant_key)
+    ).first()
+    if not threat:
+        raise HTTPException(status_code=404, detail=f"{label} with ID {threat_id} not found.")
+    return threat
+
 
 @app.get("/")
 @app.get("/health")
@@ -113,36 +236,44 @@ class GoogleAuthRequest(BaseModel):
 @app.post("/auth/google")
 def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
     """Verifies Google OAuth token and provisions a unique tenant workspace."""
+    if not GOOGLE_CLIENT_ID:
+        logger.error("GOOGLE_CLIENT_ID is not configured; refusing to accept Google sign-ins.")
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured on the server.")
+
     try:
-        # If you have a specific Google Client ID, replace None with it. 
-        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", None) 
-        
+        # Passing the client ID makes Google's library verify the token's audience,
+        # so tokens minted for other apps are rejected.
         idinfo = id_token.verify_oauth2_token(
-            request.token, 
-            google_requests.Request(), 
+            request.token,
+            google_requests.Request(),
             GOOGLE_CLIENT_ID
         )
-
-        email = idinfo.get("email")
-        name = idinfo.get("name")
-        
-        # Generate a consistent, unique API key based on the user's email
-        user_hash = hashlib.sha256(email.encode()).hexdigest()[:16]
-        tenant_api_key = f"soc_live_{user_hash}"
-        
-        # Check if they have existing threat data (to know if they are a new user)
-        existing_threats = db.query(Threat).filter(Threat.api_key == tenant_api_key).first()
-        is_first_login = True if not existing_threats else False
-
-        return {
-            "api_key": tenant_api_key,
-            "access_token": f"jwt_session_{secrets.token_hex(12)}",
-            "email": email,
-            "name": name,
-            "is_first_login": is_first_login
-        }
     except ValueError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid Google authentication token: {str(e)}")
+        logger.info("Rejected Google token: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid Google authentication token.")
+    except Exception as e:
+        logger.warning("Google token verification failed: %s", e)
+        raise HTTPException(status_code=503, detail="Could not verify the Google token right now. Try again shortly.")
+
+    email = idinfo.get("email")
+    name = idinfo.get("name")
+
+    if not email or not idinfo.get("email_verified", False):
+        raise HTTPException(status_code=401, detail="Google account email is missing or not verified.")
+
+    tenant_api_key = derive_tenant_key(email)
+
+    # Check if they have existing threat data (to know if they are a new user)
+    existing_threats = db.query(Threat).filter(Threat.api_key == tenant_api_key).first()
+    is_first_login = True if not existing_threats else False
+
+    return {
+        "api_key": tenant_api_key,
+        "access_token": create_session_token(email),
+        "email": email,
+        "name": name,
+        "is_first_login": is_first_login
+    }
 
 # Multi-Tenant Key Generation (Manual)
 @app.post("/auth/generate-key")
@@ -153,6 +284,161 @@ def generate_api_key():
         "api_key": new_key,
         "created_at": datetime.utcnow().isoformat(),
         "instructions": "Pass this key in the 'X-API-Key' header from your agent to segregate network traffic."
+    }
+
+# --- OPENROUTER KEY PROVISIONING ---
+
+def _openrouter_management_key() -> str:
+    """Reads the management key from the environment (never sent to the browser)."""
+    raw = os.getenv("OPENROUTER_MANAGEMENT_KEY", "")
+    key = re.sub(r'^["\']|["\']$', "", raw.strip())
+    if not key:
+        logger.error("OPENROUTER_MANAGEMENT_KEY is missing.")
+        raise HTTPException(status_code=503, detail="OpenRouter provisioning is not configured on the server.")
+    return key
+
+
+def create_openrouter_user_key(email: str) -> Tuple[str, str]:
+    """
+    Creates a $0-capped OpenRouter key for the user.
+    Returns (api_key, key_hash). Python port of the reference Node.js logic.
+    """
+    management_key = _openrouter_management_key()
+
+    try:
+        response = http_requests.post(
+            f"{OPENROUTER_API}/keys",
+            headers={
+                "Authorization": f"Bearer {management_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "name": f"User Key - {email}",
+                "limit": 0  # Hard cap at $0.00
+            },
+            timeout=15
+        )
+    except http_requests.Timeout:
+        logger.warning("OpenRouter key creation timed out for %s", email)
+        raise HTTPException(status_code=504, detail="OpenRouter took too long to respond. Please try again.")
+    except http_requests.RequestException as e:
+        logger.warning("OpenRouter key creation network error: %s", e)
+        raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Please try again.")
+
+    if not response.ok:
+        # Log the upstream body server-side only; never forward it to the client.
+        logger.error("OpenRouter key creation failed (%s): %s", response.status_code, response.text[:300])
+        raise HTTPException(status_code=502, detail="Failed to generate OpenRouter key.")
+
+    try:
+        body = response.json()
+    except ValueError:
+        logger.error("OpenRouter returned a non-JSON response when creating a key.")
+        raise HTTPException(status_code=502, detail="OpenRouter returned an unexpected response.")
+
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    new_key = body.get("key") or data.get("key")
+    key_hash = data.get("hash") or ""
+
+    if not new_key:
+        logger.error("OpenRouter response did not include a key.")
+        raise HTTPException(status_code=502, detail="OpenRouter did not return a key.")
+
+    return new_key, key_hash
+
+
+def revoke_openrouter_key(key_hash: str) -> None:
+    """Best-effort revocation of a previously issued key. Failures are logged, not raised."""
+    if not key_hash:
+        return
+    try:
+        management_key = _openrouter_management_key()
+        http_requests.delete(
+            f"{OPENROUTER_API}/keys/{quote(key_hash, safe='')}",
+            headers={"Authorization": f"Bearer {management_key}"},
+            timeout=15
+        )
+    except HTTPException:
+        pass
+    except http_requests.RequestException as e:
+        logger.warning("Could not revoke old OpenRouter key: %s", e)
+
+
+@app.post("/openrouter/provision")
+def provision_openrouter_key(
+    email: str = Depends(get_current_email),
+    db: Session = Depends(get_db)
+):
+    """
+    Generates a fresh $0-capped OpenRouter key for the signed-in user.
+    The previous key for the same user (if any) is revoked, so keys never pile up.
+    """
+    record = db.query(OpenRouterKeyRecord).filter(OpenRouterKeyRecord.email == email).first()
+    old_hash = record.key_hash if record else None
+
+    new_key, new_hash = create_openrouter_user_key(email)
+
+    if record:
+        record.key_hash = new_hash
+        record.created_at = datetime.utcnow()
+    else:
+        db.add(OpenRouterKeyRecord(email=email, key_hash=new_hash))
+    db.commit()
+
+    if old_hash:
+        revoke_openrouter_key(old_hash)
+
+    return {
+        "api_key": new_key,
+        "limit": 0,
+        "label": f"User Key - {email}"
+    }
+
+
+class OpenRouterVerifyRequest(BaseModel):
+    api_key: str
+
+
+@app.post("/openrouter/verify")
+def verify_openrouter_key(
+    request: OpenRouterVerifyRequest,
+    email: str = Depends(get_current_email)
+):
+    """Checks an OpenRouter key server-side so the browser never depends on OpenRouter's CORS rules."""
+    key = request.api_key.strip()
+    if not key or len(key) > 200 or not key.startswith("sk-or-"):
+        raise HTTPException(status_code=400, detail="That doesn't look like an OpenRouter key (expected sk-or-...).")
+
+    try:
+        response = http_requests.get(
+            f"{OPENROUTER_API}/key",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=15
+        )
+    except http_requests.Timeout:
+        raise HTTPException(status_code=504, detail="OpenRouter took too long to respond. Please try again.")
+    except http_requests.RequestException as e:
+        logger.warning("OpenRouter verify network error: %s", e)
+        raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Please try again.")
+
+    if response.status_code in (401, 403):
+        return {"valid": False}
+
+    if not response.ok:
+        logger.error("OpenRouter verify failed (%s): %s", response.status_code, response.text[:300])
+        raise HTTPException(status_code=502, detail="OpenRouter could not verify the key right now.")
+
+    try:
+        body = response.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="OpenRouter returned an unexpected response.")
+
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    return {
+        "valid": True,
+        "label": data.get("label"),
+        "limit": data.get("limit"),
+        "usage": data.get("usage")
     }
 
 # IPS Configuration Endpoints
@@ -169,8 +455,8 @@ def toggle_ips(active: bool = Query(..., description="Enable or disable automate
     """Toggle between passive IDS mode and active IPS mode."""
     SystemConfig.ips_mode_active = active
     status_message = (
-        "IPS Auto-Containment Enabled. Threats will be neutralized automatically." 
-        if active else 
+        "IPS Auto-Containment Enabled. Threats will be neutralized automatically."
+        if active else
         "IDS Monitoring Mode Active. Threat response requires manual authorization."
     )
     return {
@@ -193,7 +479,7 @@ def get_threats(
 ):
     """Retrieve threats list filtered by tenant isolation."""
     query = db.query(Threat).filter(Threat.api_key == tenant_key)
-    
+
     filters = []
     if severity:
         filters.append(func.lower(Threat.severity) == severity.lower())
@@ -212,17 +498,17 @@ def get_threats(
                 Threat.attack_type.ilike(search_term)
             )
         )
-        
+
     if filters:
         query = query.filter(and_(*filters))
-        
+
     total = query.count()
     pages = (total + limit - 1) // limit if total > 0 else 1
 
     query = query.order_by(desc(Threat.timestamp))
     offset = (page - 1) * limit
     threats = query.offset(offset).limit(limit).all()
-    
+
     return {
         "items": threats,
         "total": total,
@@ -241,20 +527,20 @@ def get_threats_summary(
     results = db.query(
         Threat.severity, func.count(Threat.id)
     ).filter(Threat.api_key == tenant_key).group_by(Threat.severity).all()
-    
+
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     total = 0
-    
+
     for severity, count in results:
         severity_lower = severity.lower()
         if severity_lower in counts:
             counts[severity_lower] = count
             total += count
-            
+
     blocked = db.query(Threat).filter(
         and_(Threat.api_key == tenant_key, Threat.is_blocked == True)
     ).count()
-            
+
     return ThreatSummary(
         total=total,
         critical=counts["critical"],
@@ -272,10 +558,10 @@ def get_threats_distribution(
 ):
     """Get threat distribution count grouped by attack_type for current tenant."""
     results = db.query(
-        Threat.attack_type, 
+        Threat.attack_type,
         func.count(Threat.id).label("count")
     ).filter(Threat.api_key == tenant_key).group_by(Threat.attack_type).order_by(desc("count")).all()
-    
+
     return [ThreatDistributionItem(attack_type=r[0], count=r[1]) for r in results]
 
 # 4. GET /threats/trend - Time-bucketed counts for tenant
@@ -289,14 +575,14 @@ def get_threats_trend(
     min_max = db.query(
         func.min(Threat.timestamp), func.max(Threat.timestamp)
     ).filter(Threat.api_key == tenant_key).first()
-    
+
     if not min_max or min_max[0] is None:
         return []
-        
+
     db_min_time, db_max_time = min_max
     cutoff_date = db_max_time - timedelta(days=days)
     time_span = db_max_time - max(db_min_time, cutoff_date)
-    
+
     if time_span < timedelta(days=2):
         if engine.name == "sqlite":
             time_group = func.strftime("%Y-%m-%dT%H:00:00Z", Threat.timestamp)
@@ -307,7 +593,7 @@ def get_threats_trend(
             time_group = func.strftime("%Y-%m-%d", Threat.timestamp)
         else:
             time_group = func.to_char(Threat.timestamp, "YYYY-MM-DD")
-            
+
     trend_query = db.query(
         time_group.label("time_bucket"),
         func.count(Threat.id).label("total_count"),
@@ -318,7 +604,7 @@ def get_threats_trend(
     ).filter(
         and_(Threat.api_key == tenant_key, Threat.timestamp >= cutoff_date)
     ).group_by("time_bucket").order_by(asc("time_bucket")).all()
-    
+
     trend_data = []
     for row in trend_query:
         trend_data.append(
@@ -331,7 +617,7 @@ def get_threats_trend(
                 low=int(row[5] or 0)
             )
         )
-        
+
     return trend_data
 
 # 5. GET /threats/map - Geographic attack vectors for current tenant
@@ -378,49 +664,55 @@ def get_threats_map(
         for r in results
     ]
 
-# 6. GET /threats/{id} - Single threat details
+# 6. GET /threats/{id} - Single threat details (tenant-scoped)
 @app.get("/threats/{id}", response_model=ThreatResponse)
-def get_threat_detail(id: int, db: Session = Depends(get_db)):
-    threat = db.query(Threat).filter(Threat.id == id).first()
-    if not threat:
-        raise HTTPException(status_code=404, detail=f"Threat with ID {id} not found.")
-    return threat
+def get_threat_detail(
+    id: int,
+    tenant_key: str = Depends(get_tenant_key),
+    db: Session = Depends(get_db)
+):
+    return get_owned_threat(db, id, tenant_key)
 
-# 7. PATCH /threats/{id} - Update threat status/AI explanation
+# 7. PATCH /threats/{id} - Update threat status/AI explanation (tenant-scoped)
 @app.patch("/threats/{id}", response_model=ThreatResponse)
-def update_threat(id: int, update_data: ThreatUpdate, db: Session = Depends(get_db)):
-    threat = db.query(Threat).filter(Threat.id == id).first()
-    if not threat:
-        raise HTTPException(status_code=404, detail=f"Threat with ID {id} not found.")
-        
+def update_threat(
+    id: int,
+    update_data: ThreatUpdate,
+    tenant_key: str = Depends(get_tenant_key),
+    db: Session = Depends(get_db)
+):
+    threat = get_owned_threat(db, id, tenant_key)
+
     data = update_data.model_dump(exclude_unset=True)
     if "status" in data:
         status_val = data["status"].lower()
         if status_val not in ["open", "investigating", "resolved"]:
             raise HTTPException(status_code=400, detail="Invalid status. Must be 'open', 'investigating', or 'resolved'.")
         threat.status = status_val
-        
+
     if "ai_explanation" in data:
         threat.ai_explanation = data["ai_explanation"]
-        
+
     db.commit()
     db.refresh(threat)
     return threat
 
-# 8. POST /threats/{id}/explain - Generate AI explanation on demand
+# 8. POST /threats/{id}/explain - Generate AI explanation on demand (tenant-scoped)
 @app.post("/threats/{id}/explain", response_model=ThreatResponse)
-def explain_threat(id: int, db: Session = Depends(get_db)):
+def explain_threat(
+    id: int,
+    tenant_key: str = Depends(get_tenant_key),
+    db: Session = Depends(get_db)
+):
     from .ai_service import generate_threat_explanation
-    threat = db.query(Threat).filter(Threat.id == id).first()
-    if not threat:
-        raise HTTPException(status_code=404, detail=f"Threat with ID {id} not found.")
-        
+    threat = get_owned_threat(db, id, tenant_key)
+
     if threat.ai_explanation:
         return threat
-        
+
     explanation = generate_threat_explanation(threat)
     threat.ai_explanation = explanation
-    
+
     db.commit()
     db.refresh(threat)
     return threat
@@ -432,21 +724,19 @@ def get_model_metrics():
     if not os.path.exists(metrics_path):
         raise HTTPException(status_code=404, detail="Model metrics file not found. Please train model first.")
     with open(metrics_path, "r") as f:
-        import json
         data = json.load(f)
     return data
 
 # 10. POST /threats/{id}/block - Automated containment with optional OS firewall enforcement
 @app.post("/threats/{id}/block", response_model=ThreatResponse)
 def block_threat_source(
-    id: int, 
+    id: int,
     enforce_os: bool = Query(False, description="Attempt true host OS firewall rule execution"),
+    tenant_key: str = Depends(get_tenant_key),
     db: Session = Depends(get_db)
 ):
-    threat = db.query(Threat).filter(Threat.id == id).first()
-    if not threat:
-        raise HTTPException(status_code=404, detail=f"Threat with ID {id} not found.")
-        
+    threat = get_owned_threat(db, id, tenant_key)
+
     threat.is_blocked = True
     threat.status = "resolved"
 
@@ -463,11 +753,13 @@ def block_threat_source(
 
 # 11. GET /threats/{id}/report/pdf - Forensic Incident Report
 @app.get("/threats/{id}/report/pdf")
-def export_threat_pdf(id: int, db: Session = Depends(get_db)):
+def export_threat_pdf(
+    id: int,
+    tenant_key: str = Depends(get_tenant_key),
+    db: Session = Depends(get_db)
+):
     from .report_service import generate_threat_pdf_report
-    threat = db.query(Threat).filter(Threat.id == id).first()
-    if not threat:
-        raise HTTPException(status_code=404, detail=f"Threat #{id} not found.")
+    threat = get_owned_threat(db, id, tenant_key, label="Threat")
 
     pdf_buffer = generate_threat_pdf_report(threat)
     return Response(
@@ -480,21 +772,25 @@ def export_threat_pdf(id: int, db: Session = Depends(get_db)):
 
 # 12. GET /threats/{id}/xai - SHAP Feature Attributions
 @app.get("/threats/{id}/xai")
-def get_threat_xai(id: int, db: Session = Depends(get_db)):
+def get_threat_xai(
+    id: int,
+    tenant_key: str = Depends(get_tenant_key),
+    db: Session = Depends(get_db)
+):
     from .xai_service import xai_service
-    threat = db.query(Threat).filter(Threat.id == id).first()
-    if not threat:
-        raise HTTPException(status_code=404, detail=f"Threat #{id} not found.")
+    threat = get_owned_threat(db, id, tenant_key)
 
     features = threat.features or {}
     return xai_service.explain_threat_features(features, threat.attack_type)
 
 # 13. GET /threats/{id}/rules - Rule generation
 @app.get("/threats/{id}/rules")
-def get_containment_rules(id: int, db: Session = Depends(get_db)):
-    threat = db.query(Threat).filter(Threat.id == id).first()
-    if not threat:
-        raise HTTPException(status_code=404, detail=f"Threat #{id} not found.")
+def get_containment_rules(
+    id: int,
+    tenant_key: str = Depends(get_tenant_key),
+    db: Session = Depends(get_db)
+):
+    threat = get_owned_threat(db, id, tenant_key)
 
     ip = threat.source_ip
     return {
@@ -516,7 +812,7 @@ async def upload_pcap(
     db: Session = Depends(get_db)
 ):
     from src.pcap_analyzer import parse_pcap, inspect_and_classify_flows, create_sample_pcap
-    
+
     if demo or not file:
         sample_path = os.path.join(PROJECT_ROOT, "data", "live_sample.pcap")
         create_sample_pcap(sample_path)
@@ -542,10 +838,10 @@ async def upload_pcap(
         if threat_ids:
             # Bind all newly created records to the current tenant key
             db.query(Threat).filter(Threat.id.in_(threat_ids)).update(
-                {Threat.api_key: tenant_key}, 
+                {Threat.api_key: tenant_key},
                 synchronize_session=False
             )
-            
+
             # If IPS mode is active, automatically neutralize critical and high threats
             if SystemConfig.ips_mode_active:
                 for threat_item in classified_threats:
@@ -562,17 +858,16 @@ async def upload_pcap(
                                 threat_item["status"] = "resolved"
             db.commit()
 
-    # Broadcast with tenant isolation metadata to WebSocket clients
+    # Broadcast only to this tenant's WebSocket clients
     if classified_threats:
         await manager.broadcast({
             "type": "pcap_analysis_completed",
-            "api_key": tenant_key,
             "filename": filename,
             "flows_count": len(flows),
             "threats_count": len(classified_threats),
             "threats": classified_threats,
             "ips_mode": SystemConfig.ips_mode_active
-        })
+        }, tenant_key)
 
     return {
         "success": True,
@@ -584,10 +879,14 @@ async def upload_pcap(
         "ips_active": SystemConfig.ips_mode_active
     }
 
-# 15. WebSocket /ws/threats - Real-time Push Telemetry Stream
+# 15. WebSocket /ws/threats - Real-time Push Telemetry Stream (tenant-scoped)
 @app.websocket("/ws/threats")
-async def websocket_threats_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+async def websocket_threats_endpoint(
+    websocket: WebSocket,
+    api_key: Optional[str] = Query(None)
+):
+    tenant_key = api_key or "default"
+    await manager.connect(websocket, tenant_key)
     try:
         while True:
             await websocket.receive_text()

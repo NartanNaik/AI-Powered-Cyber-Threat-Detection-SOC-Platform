@@ -6,61 +6,100 @@ import {
   AlertCircle, 
   Terminal, 
   Lock, 
-  KeyRound, 
-  ExternalLink 
+  KeyRound
 } from 'lucide-react';
 import { CyberCubeLogo } from './SplashScreen';
+import { isSetupComplete } from '../utils/setupState';
 
 const BACKEND_URL = 'https://ai-cyber-threat-backend-k0pz.onrender.com';
+
+const clearSessionKeys = () => {
+  [
+    'soc_session_token',
+    'soc_tenant_key',
+    'soc_user_email',
+    'soc_user_name',
+    'soc_openrouter_key'
+  ].forEach((k) => sessionStorage.removeItem(k));
+};
 
 const LoginModal = ({ isOpen, onLoginSuccess }) => {
   const [errorMsg, setErrorMsg] = useState(null);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [statusText, setStatusText] = useState('Authenticating Security Credentials...');
 
   if (!isOpen) return null;
 
   const handleGoogleSuccess = async (credentialResponse) => {
     setIsVerifying(true);
     setErrorMsg(null);
+    setStatusText('Authenticating Security Credentials...');
+
+    // Never let a previous user's keys leak into this session.
+    clearSessionKeys();
 
     try {
-      // Exchange Google ID Token with backend to authenticate/provision tenant
-      const res = await axios.post(`${BACKEND_URL}/auth/google`, {
-        token: credentialResponse.credential
-      });
+      // 1. Exchange the Google ID token with the backend to authenticate / provision the tenant.
+      //    The free backend host can take a while to wake up, so the timeout is generous.
+      const res = await axios.post(
+        `${BACKEND_URL}/auth/google`,
+        { token: credentialResponse.credential },
+        { timeout: 60000 }
+      );
 
-      if (res.data && res.data.api_key) {
-        // Store session tokens and tenant API key
-        sessionStorage.setItem('soc_session_token', res.data.access_token || '');
-        sessionStorage.setItem('soc_tenant_key', res.data.api_key);
-        sessionStorage.setItem('soc_user_email', res.data.email);
-        sessionStorage.setItem('soc_user_name', res.data.name || 'Security Operator');
-
-        // Check if user has initialized their agent telemetry
-        const isNewUser = res.data.is_first_login || false;
-
-        onLoginSuccess({
-          apiKey: res.data.api_key,
-          email: res.data.email,
-          name: res.data.name,
-          isNewUser
-        });
-      } else {
-        throw new Error('Tenant provisioning failed: Invalid server credentials response.');
+      if (!res.data || !res.data.api_key || !res.data.access_token) {
+        throw new Error('Tenant provisioning failed: invalid server response.');
       }
+
+      sessionStorage.setItem('soc_session_token', res.data.access_token);
+      sessionStorage.setItem('soc_tenant_key', res.data.api_key);
+      sessionStorage.setItem('soc_user_email', res.data.email);
+      sessionStorage.setItem('soc_user_name', res.data.name || 'Security Operator');
+
+      const isNewUser = res.data.is_first_login || false;
+
+      // 2. Ask the backend to generate this user's OpenRouter key.
+      //    The management key never leaves the server; we only receive the user's own $0-capped key.
+      //    Users who already finished setup keep their existing key, so we skip re-provisioning.
+      if (!isSetupComplete()) {
+        setStatusText('Provisioning your AI workspace...');
+        try {
+          const keyRes = await axios.post(
+            `${BACKEND_URL}/openrouter/provision`,
+            {},
+            {
+              headers: { Authorization: `Bearer ${res.data.access_token}` },
+              timeout: 30000
+            }
+          );
+          if (keyRes.data && keyRes.data.api_key) {
+            sessionStorage.setItem('soc_openrouter_key', keyRes.data.api_key);
+          }
+        } catch (keyErr) {
+          // Not fatal: the setup wizard lets the user paste their own OpenRouter key instead.
+          console.warn('OpenRouter key provisioning failed:', keyErr?.response?.data?.detail || keyErr.message);
+        }
+      }
+
+      onLoginSuccess({
+        apiKey: res.data.api_key,
+        email: res.data.email,
+        name: res.data.name,
+        isNewUser
+      });
     } catch (err) {
       console.error('Authentication Error:', err);
-      // Fallback for offline/local sandbox testing if backend auth route is pending
-      const fallbackKey = 'soc_live_' + Math.random().toString(16).substring(2, 10);
-      sessionStorage.setItem('soc_tenant_key', fallbackKey);
-      sessionStorage.setItem('soc_user_email', 'operator@ai-soc.internal');
-      
-      onLoginSuccess({
-        apiKey: fallbackKey,
-        email: 'operator@ai-soc.internal',
-        name: 'SOC Analyst',
-        isNewUser: true
-      });
+      clearSessionKeys();
+
+      let message = 'Sign-in failed. Please try again.';
+      if (err.code === 'ECONNABORTED') {
+        message = 'The backend took too long to respond. It may be waking up. Wait a few seconds and try again.';
+      } else if (err.response?.data?.detail) {
+        message = err.response.data.detail;
+      } else if (!err.response) {
+        message = 'Could not reach the CyberCube backend. Check your connection and try again.';
+      }
+      setErrorMsg(message);
     } finally {
       setIsVerifying(false);
     }
@@ -117,7 +156,7 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
           {isVerifying ? (
             <div className="flex items-center gap-2.5 py-3 text-xs font-semibold text-emerald-400 font-mono">
               <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent"></span>
-              <span>Authenticating Security Credentials...</span>
+              <span>{statusText}</span>
             </div>
           ) : (
             <div className="w-full flex justify-center py-1">
