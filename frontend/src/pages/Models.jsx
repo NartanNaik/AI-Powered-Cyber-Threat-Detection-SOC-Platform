@@ -8,6 +8,7 @@ const Models = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Securely pull the API URL from environment variables
   const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
   const fetchMetrics = async () => {
@@ -65,6 +66,13 @@ const Models = () => {
       { feature: 'tot_fwd_pkts', importance: 0.1421 },
       { feature: 'fwd_pkt_len_mean', importance: 0.1284 },
       { feature: 'flow_byts_s', importance: 0.1105 }
+    ],
+    benchmark_comparison: [
+      { name: 'Random Forest (Selected)', type: 'Ensemble Tree', accuracy: 99.5, macro_f1: 99.37, precision: 99.24, recall: 99.49, latency_us: 45, train_time_s: 12.4, selected: true },
+      { name: 'XGBoost', type: 'Gradient Boosting', accuracy: 99.6, macro_f1: 99.41, precision: 99.10, recall: 99.70, latency_us: 110, train_time_s: 45.2, selected: false },
+      { name: 'LightGBM', type: 'Gradient Boosting', accuracy: 99.4, macro_f1: 99.12, precision: 98.90, recall: 99.20, latency_us: 38, train_time_s: 8.7, selected: false },
+      { name: 'Deep Neural Network (DNN)', type: 'Multi-Layer Perceptron', accuracy: 98.9, macro_f1: 98.50, precision: 98.10, recall: 98.80, latency_us: 850, train_time_s: 320.5, selected: false },
+      { name: 'Logistic Regression', type: 'Linear Classifier', accuracy: 87.4, macro_f1: 85.20, precision: 82.50, recall: 88.10, latency_us: 12, train_time_s: 3.1, selected: false }
     ]
   };
 
@@ -89,17 +97,23 @@ const Models = () => {
         </div>
         <button
           onClick={fetchMetrics}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-850 border border-slate-800 text-xs font-semibold rounded-lg text-slate-300 transition-all"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-semibold rounded-lg text-slate-300 transition-all"
         >
           <RefreshCw className="w-3.5 h-3.5 text-sky-400" />
           <span>Refresh Metrics</span>
         </button>
       </div>
 
+      {error && (
+        <div className="bg-rose-950/40 border border-rose-500/30 text-rose-300 px-4 py-2 rounded-lg text-xs font-semibold">
+          {error}
+        </div>
+      )}
+
       {/* Model Overview Panel */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {topCards.map((m, idx) => (
-          <div key={idx} className="glass-panel p-5 text-center">
+          <div key={idx} className="bg-slate-900/50 border border-slate-800 rounded-xl p-5 text-center shadow-lg">
             <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider block">{m.name}</span>
             <span className="text-2xl font-bold text-emerald-400 mt-2 block tracking-tight font-mono">{m.value}</span>
             <span className="text-[10px] text-slate-500 mt-1 block">{m.desc}</span>
@@ -111,9 +125,9 @@ const Models = () => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
         {/* Left: Metadata & Top Features */}
-        <div className="glass-panel p-5 space-y-4 lg:col-span-1">
+        <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-5 space-y-4 lg:col-span-1 shadow-lg">
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 mb-2">
-            <Zap className="w-4 h-4 text-cyber-yellow" />
+            <Zap className="w-4 h-4 text-amber-400" />
             <span>Classifier Architecture</span>
           </h3>
           <div className="space-y-3 text-xs">
@@ -162,7 +176,7 @@ const Models = () => {
         </div>
 
         {/* Right: Class Metrics Table */}
-        <div className="glass-panel p-5 lg:col-span-2">
+        <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-5 lg:col-span-2 shadow-lg">
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 mb-4">
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
             <span>Class-Wise Performance Matrix</span>
@@ -180,7 +194,7 @@ const Models = () => {
               </thead>
               <tbody className="divide-y divide-slate-800/40 text-slate-300 font-medium">
                 {modelInfo.class_metrics.map((row, idx) => (
-                  <tr key={idx} className="hover:bg-slate-900/20">
+                  <tr key={idx} className="hover:bg-slate-800/40 transition-colors">
                     <td className="py-3 px-3 font-semibold text-slate-200">{row.class}</td>
                     <td className="py-3 px-3 font-mono">{row.precision}</td>
                     <td className="py-3 px-3 font-mono">{row.recall}</td>
@@ -197,7 +211,7 @@ const Models = () => {
 
       {/* Confusion Matrix Block */}
       {modelInfo.confusion_matrix && (
-        <div className="glass-panel p-5">
+        <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-5 shadow-lg">
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 mb-4">
             <Award className="w-4 h-4 text-sky-400" />
             <span>Confusion Matrix (Real Test Dataset Validation)</span>
@@ -214,15 +228,15 @@ const Models = () => {
               </thead>
               <tbody className="divide-y divide-slate-800/40 text-slate-300 font-medium">
                 {modelInfo.confusion_matrix.rows.map((row, idx) => (
-                  <tr key={idx} className="hover:bg-slate-900/20">
+                  <tr key={idx} className="hover:bg-slate-800/40 transition-colors">
                     <td className="py-3.5 px-3 text-left font-sans font-semibold text-slate-400">{row.label}</td>
                     {row.values.map((v, i) => (
                       <td 
                         key={i} 
                         className={`py-3.5 px-3 ${
                           idx === i 
-                            ? 'bg-emerald-950/20 text-emerald-400 font-bold border border-emerald-500/10' 
-                            : v > 0 ? 'text-rose-400/80 font-bold' : 'text-slate-600'
+                            ? 'bg-emerald-900/20 text-emerald-400 font-bold border border-emerald-500/10 rounded' 
+                            : v > 0 ? 'text-rose-400 font-bold' : 'text-slate-600'
                         }`}
                       >
                         {v}
@@ -238,7 +252,7 @@ const Models = () => {
 
       {/* Comparative Multi-Model Benchmark Section */}
       {modelInfo.benchmark_comparison && (
-        <div className="glass-panel p-5 space-y-4">
+        <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-5 space-y-4 shadow-lg">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
               <Cpu className="w-4 h-4 text-sky-400" />

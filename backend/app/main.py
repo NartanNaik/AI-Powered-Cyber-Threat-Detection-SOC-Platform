@@ -4,6 +4,8 @@ import uuid
 import secrets
 import platform
 import subprocess
+import hashlib
+from pydantic import BaseModel
 from fastapi import (
     FastAPI, 
     Depends, 
@@ -21,6 +23,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_, desc, asc, case
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
+
+# Google OAuth Imports
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 # Ensure project root in sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -99,7 +105,46 @@ def read_root():
         "docs_url": "/docs"
     }
 
-# Multi-Tenant Key Generation
+# --- AUTHENTICATION ENDPOINTS ---
+
+class GoogleAuthRequest(BaseModel):
+    token: str
+
+@app.post("/auth/google")
+def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
+    """Verifies Google OAuth token and provisions a unique tenant workspace."""
+    try:
+        # If you have a specific Google Client ID, replace None with it. 
+        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", None) 
+        
+        idinfo = id_token.verify_oauth2_token(
+            request.token, 
+            google_requests.Request(), 
+            GOOGLE_CLIENT_ID
+        )
+
+        email = idinfo.get("email")
+        name = idinfo.get("name")
+        
+        # Generate a consistent, unique API key based on the user's email
+        user_hash = hashlib.sha256(email.encode()).hexdigest()[:16]
+        tenant_api_key = f"soc_live_{user_hash}"
+        
+        # Check if they have existing threat data (to know if they are a new user)
+        existing_threats = db.query(Threat).filter(Threat.api_key == tenant_api_key).first()
+        is_first_login = True if not existing_threats else False
+
+        return {
+            "api_key": tenant_api_key,
+            "access_token": f"jwt_session_{secrets.token_hex(12)}",
+            "email": email,
+            "name": name,
+            "is_first_login": is_first_login
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid Google authentication token: {str(e)}")
+
+# Multi-Tenant Key Generation (Manual)
 @app.post("/auth/generate-key")
 def generate_api_key():
     """Generates a secure, unique API key for an agent or tenant deployment."""

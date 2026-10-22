@@ -3,10 +3,13 @@ import struct
 import time
 import urllib.request
 import json
+import os
+from dotenv import load_dotenv
 
-API_URL = "https://ai-cyber-threat-backend-k0pz.onrender.com/pcap/upload"
-PACKET_BATCH_SIZE = 150
-API_KEY = "soc_default_key"  
+load_dotenv()
+API_URL = os.getenv("API_URL","https://your-backend.onrender.com/pcap/upload")
+PACKET_BATCH_SIZE = int(os.getenv("PACKET_BATCH_SIZE", 150))
+API_KEY = os.getenv("API_KEY", "default_key")
 
 def get_local_ip():
     """Dynamically finds the active network interface IP."""
