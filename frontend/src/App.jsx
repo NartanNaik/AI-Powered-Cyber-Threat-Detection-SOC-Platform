@@ -10,6 +10,7 @@ import {
   Clock,
   Github,
   Linkedin,
+  Mail,
   ChevronLeft,
   ChevronRight
 } from 'lucide-react';
@@ -206,6 +207,11 @@ function App() {
             Network
           </div>
           
+          <a href="mailto:naiknartana@gmail.com" title={!isSidebarOpen ? "Email" : ""} className="flex items-center gap-3 text-slate-400 hover:text-emerald-400 transition-colors group">
+            <Mail className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
+            <span className={`text-xs font-semibold whitespace-nowrap ${!isSidebarOpen && 'hidden'}`}>Email Developer</span>
+          </a>
+
           <a href="https://github.com/NartanNaik" target="_blank" rel="noreferrer" title={!isSidebarOpen ? "GitHub" : ""} className="flex items-center gap-3 text-slate-400 hover:text-emerald-400 transition-colors group">
             <Github className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
             <span className={`text-xs font-semibold whitespace-nowrap ${!isSidebarOpen && 'hidden'}`}>Developer GitHub</span>
