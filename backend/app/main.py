@@ -96,7 +96,7 @@ class OpenRouterKeyRecord(Base):
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
-    title="AI Cyber Threat Detection Platform API",
+    title="CyberCube SOC API",
     description="Multi-tenant SOC-style backend for monitoring and analyzing simulated network threats.",
     version="1.2.0"
 )
@@ -219,74 +219,7 @@ def get_owned_threat(db: Session, threat_id: int, tenant_key: str, label: str = 
     return threat
 
 
-@app.get("/")
-@app.get("/health")
-def read_root():
-    return {
-        "status": "online",
-        "service": "AI Cyber Threat Detection Platform API",
-        "docs_url": "/docs"
-    }
-
-# --- AUTHENTICATION ENDPOINTS ---
-
-class GoogleAuthRequest(BaseModel):
-    token: str
-
-@app.post("/auth/google")
-def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
-    """Verifies Google OAuth token and provisions a unique tenant workspace."""
-    if not GOOGLE_CLIENT_ID:
-        logger.error("GOOGLE_CLIENT_ID is not configured; refusing to accept Google sign-ins.")
-        raise HTTPException(status_code=503, detail="Google sign-in is not configured on the server.")
-
-    try:
-        # Passing the client ID makes Google's library verify the token's audience,
-        # so tokens minted for other apps are rejected.
-        idinfo = id_token.verify_oauth2_token(
-            request.token,
-            google_requests.Request(),
-            GOOGLE_CLIENT_ID
-        )
-    except ValueError as e:
-        logger.info("Rejected Google token: %s", e)
-        raise HTTPException(status_code=401, detail="Invalid Google authentication token.")
-    except Exception as e:
-        logger.warning("Google token verification failed: %s", e)
-        raise HTTPException(status_code=503, detail="Could not verify the Google token right now. Try again shortly.")
-
-    email = idinfo.get("email")
-    name = idinfo.get("name")
-
-    if not email or not idinfo.get("email_verified", False):
-        raise HTTPException(status_code=401, detail="Google account email is missing or not verified.")
-
-    tenant_api_key = derive_tenant_key(email)
-
-    # Check if they have existing threat data (to know if they are a new user)
-    existing_threats = db.query(Threat).filter(Threat.api_key == tenant_api_key).first()
-    is_first_login = True if not existing_threats else False
-
-    return {
-        "api_key": tenant_api_key,
-        "access_token": create_session_token(email),
-        "email": email,
-        "name": name,
-        "is_first_login": is_first_login
-    }
-
-# Multi-Tenant Key Generation (Manual)
-@app.post("/auth/generate-key")
-def generate_api_key():
-    """Generates a secure, unique API key for an agent or tenant deployment."""
-    new_key = f"soc_live_{secrets.token_hex(16)}"
-    return {
-        "api_key": new_key,
-        "created_at": datetime.utcnow().isoformat(),
-        "instructions": "Pass this key in the 'X-API-Key' header from your agent to segregate network traffic."
-    }
-
-# --- OPENROUTER KEY PROVISIONING ---
+# --- OPENROUTER KEY PROVISIONING CORE LOGIC ---
 
 def _openrouter_management_key() -> str:
     """Reads the management key from the environment (never sent to the browser)."""
@@ -314,7 +247,7 @@ def create_openrouter_user_key(email: str) -> Tuple[str, str]:
             },
             json={
                 "name": f"User Key - {email}",
-                "limit": 0  # Hard cap at $0.00
+                "limit": 0  # Hard cap at $0.00 to guarantee only free models are used
             },
             timeout=15
         )
@@ -326,7 +259,6 @@ def create_openrouter_user_key(email: str) -> Tuple[str, str]:
         raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Please try again.")
 
     if not response.ok:
-        # Log the upstream body server-side only; never forward it to the client.
         logger.error("OpenRouter key creation failed (%s): %s", response.status_code, response.text[:300])
         raise HTTPException(status_code=502, detail="Failed to generate OpenRouter key.")
 
@@ -364,6 +296,87 @@ def revoke_openrouter_key(key_hash: str) -> None:
         logger.warning("Could not revoke old OpenRouter key: %s", e)
 
 
+# --- AUTHENTICATION ENDPOINTS ---
+
+class GoogleAuthRequest(BaseModel):
+    token: str
+
+@app.post("/auth/google")
+def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
+    """Verifies Google OAuth token, provisions a unique tenant workspace, and Auto-Generates OpenRouter Key."""
+    if not GOOGLE_CLIENT_ID:
+        logger.error("GOOGLE_CLIENT_ID is not configured; refusing to accept Google sign-ins.")
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured on the server.")
+
+    try:
+        idinfo = id_token.verify_oauth2_token(
+            request.token,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID
+        )
+    except ValueError as e:
+        logger.info("Rejected Google token: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid Google authentication token.")
+    except Exception as e:
+        logger.warning("Google token verification failed: %s", e)
+        raise HTTPException(status_code=503, detail="Could not verify the Google token right now. Try again shortly.")
+
+    email = idinfo.get("email")
+    name = idinfo.get("name")
+
+    if not email or not idinfo.get("email_verified", False):
+        raise HTTPException(status_code=401, detail="Google account email is missing or not verified.")
+
+    tenant_api_key = derive_tenant_key(email)
+
+    # Check if they have existing threat data (to know if they are a new user)
+    existing_threats = db.query(Threat).filter(Threat.api_key == tenant_api_key).first()
+    is_first_login = True if not existing_threats else False
+
+    # --- AUTO-PROVISION OPENROUTER KEY ---
+    # We do this silently so a failure here doesn't crash the entire login flow
+    or_api_key = None
+    try:
+        record = db.query(OpenRouterKeyRecord).filter(OpenRouterKeyRecord.email == email).first()
+        old_hash = record.key_hash if record else None
+
+        # Generate new $0-capped key for this session
+        new_key, new_hash = create_openrouter_user_key(email)
+        or_api_key = new_key
+
+        if record:
+            record.key_hash = new_hash
+            record.created_at = datetime.utcnow()
+        else:
+            db.add(OpenRouterKeyRecord(email=email, key_hash=new_hash))
+        db.commit()
+
+        # Clean up old keys automatically
+        if old_hash:
+            revoke_openrouter_key(old_hash)
+    except Exception as e:
+        logger.warning(f"Auto-provisioning OpenRouter key failed for {email}: {e}")
+
+    return {
+        "api_key": tenant_api_key,
+        "access_token": create_session_token(email),
+        "email": email,
+        "name": name,
+        "is_first_login": is_first_login,
+        "openrouter_key": or_api_key  # Passing this securely to frontend to bypass SetupWizard manual entry
+    }
+
+@app.post("/auth/generate-key")
+def generate_api_key():
+    """Generates a secure, unique API key for an agent or tenant deployment."""
+    new_key = f"soc_live_{secrets.token_hex(16)}"
+    return {
+        "api_key": new_key,
+        "created_at": datetime.utcnow().isoformat(),
+        "instructions": "Pass this key in the 'X-API-Key' header from your agent to segregate network traffic."
+    }
+
+# Standalone provisioning endpoint (in case the frontend needs to manually trigger a refresh)
 @app.post("/openrouter/provision")
 def provision_openrouter_key(
     email: str = Depends(get_current_email),
@@ -394,10 +407,8 @@ def provision_openrouter_key(
         "label": f"User Key - {email}"
     }
 
-
 class OpenRouterVerifyRequest(BaseModel):
     api_key: str
-
 
 @app.post("/openrouter/verify")
 def verify_openrouter_key(

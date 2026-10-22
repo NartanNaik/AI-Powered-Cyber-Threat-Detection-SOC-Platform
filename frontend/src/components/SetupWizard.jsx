@@ -102,6 +102,19 @@ const SetupWizard = ({ onComplete }) => {
     clearTimeout(copyTimer.current);
   }, []);
 
+  // --- AUTO EXECUTION HOOKS ---
+  useEffect(() => {
+    if (linkStatus === 'idle') {
+      handleEstablishLink();
+    }
+  }, [linkStatus]);
+
+  useEffect(() => {
+    if (linkStatus === 'ok' && orStatus === 'idle') {
+      handleVerifyOpenRouter();
+    }
+  }, [linkStatus, orStatus]);
+
   const copyText = (value, field) => {
     try {
       navigator.clipboard.writeText(value);
@@ -119,7 +132,6 @@ const SetupWizard = ({ onComplete }) => {
     setStreamStatus('unknown');
 
     try {
-      // Free hosting can take up to a minute to wake the backend, so the timeout is generous.
       await axios.get(`${BACKEND_URL}/health`, {
         headers: { 'X-API-Key': tenantKey },
         timeout: 60000
@@ -146,6 +158,7 @@ const SetupWizard = ({ onComplete }) => {
     if (!activeKey) {
       setOrStatus('failed');
       setOrError('Paste an OpenRouter API key to verify.');
+      setUseManualKey(true);
       return;
     }
 
@@ -154,7 +167,6 @@ const SetupWizard = ({ onComplete }) => {
     setOrInfo(null);
 
     try {
-      // Verification runs on the backend so the browser never depends on OpenRouter's CORS rules.
       const res = await axios.post(
         `${BACKEND_URL}/openrouter/verify`,
         { api_key: activeKey },
@@ -171,9 +183,11 @@ const SetupWizard = ({ onComplete }) => {
       } else {
         setOrStatus('failed');
         setOrError('OpenRouter did not confirm this key. Check it and try again.');
+        setUseManualKey(true);
       }
     } catch (err) {
       setOrStatus('failed');
+      setUseManualKey(true);
       if (err.response?.status === 401) {
         setOrError('Your session has expired. Sign in again to continue.');
       } else {
@@ -195,7 +209,7 @@ const SetupWizard = ({ onComplete }) => {
     if (!canFinish) return;
     setIsFinishing(true);
     finishTimer.current = setTimeout(() => {
-      markSetupComplete(); // persists to localStorage so a refresh can never bypass setup
+      markSetupComplete(); 
       if (typeof onComplete === 'function') onComplete();
     }, 1500);
   };
@@ -236,7 +250,7 @@ const SetupWizard = ({ onComplete }) => {
         <div className="flex-1 overflow-y-auto p-8 flex flex-col gap-5">
 
           {/* Step 1: Dashboard link */}
-          <section className="rounded-xl border border-slate-800 bg-slate-950/40 p-5">
+          <section className={`rounded-xl border ${linkOk ? 'border-emerald-500/30 bg-emerald-950/10' : 'border-slate-800 bg-slate-950/40'} p-5 transition-colors`}>
             <div className="flex items-start gap-4">
               <StepNumber n={1} done={linkOk} />
               <div className="min-w-0 flex-1">
@@ -304,7 +318,7 @@ const SetupWizard = ({ onComplete }) => {
           </section>
 
           {/* Step 2: OpenRouter connection */}
-          <section className={`rounded-xl border border-slate-800 bg-slate-950/40 p-5 transition-opacity ${linkOk ? 'opacity-100' : 'opacity-60'}`}>
+          <section className={`rounded-xl border ${orOk ? 'border-emerald-500/30 bg-emerald-950/10' : 'border-slate-800 bg-slate-950/40'} p-5 transition-opacity ${linkOk ? 'opacity-100' : 'opacity-60'}`}>
             <div className="flex items-start gap-4">
               <StepNumber n={2} done={orOk} />
               <div className="min-w-0 flex-1">
@@ -334,10 +348,10 @@ const SetupWizard = ({ onComplete }) => {
                   </div>
                 ) : (
                   <div className="mt-4">
-                    {!provisionedKey && (
+                    {(!provisionedKey || orStatus === 'failed') && (
                       <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-950/20 p-3 text-xs text-amber-300">
                         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-                        <span>We couldn't provision a key automatically at login. Paste your own OpenRouter key below to continue.</span>
+                        <span>{orError || "We couldn't provision a key automatically at login. Paste your own OpenRouter key below to continue."}</span>
                       </div>
                     )}
                     <label className="text-[11px] font-semibold text-slate-500" htmlFor="or-key-input">OpenRouter API key</label>
@@ -374,7 +388,7 @@ const SetupWizard = ({ onComplete }) => {
                   </div>
                 )}
 
-                {orStatus === 'failed' && (
+                {orStatus === 'failed' && !useManualKey && (
                   <div className="mt-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-950/30 p-3 text-xs text-rose-300">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
                     <span>{orError}</span>
