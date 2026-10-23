@@ -8,13 +8,52 @@ import {
   Loader2, 
   ChevronRight,
   ShieldCheck,
+  ShieldOff,
   Copy,
-  ExternalLink
+  ExternalLink,
+  Download,
+  Terminal
 } from 'lucide-react';
 import { CyberCubeLogo } from './SplashScreen';
 import { markSetupComplete } from '../utils/setupState';
 
 const BACKEND_URL = 'https://ai-cyber-threat-backend-k0pz.onrender.com';
+
+// TODO: replace "yourusername" with your GitHub account and make sure each release
+// asset below is uploaded under exactly this file name.
+const AGENT_RELEASE_BASE = 'https://github.com/yourusername/cybercube-agent/releases/latest/download';
+
+const SENSOR_PLATFORMS = {
+  windows: {
+    label: 'Windows',
+    file: 'agent.exe',
+    runIntro: 'Open PowerShell in the folder where you saved the file, then run:',
+    command: (key) => `.\\agent.exe --key ${key}`,
+    hint: 'If Windows SmartScreen appears, choose More info, then Run anyway. Run PowerShell as Administrator if the sensor asks for elevated access.'
+  },
+  macos: {
+    label: 'macOS',
+    file: 'agent-macos',
+    runIntro: 'Open Terminal in the folder where you saved the file, then run:',
+    command: (key) =>
+      `xattr -d com.apple.quarantine ./agent-macos 2>/dev/null; chmod +x ./agent-macos && sudo ./agent-macos --key ${key}`,
+    hint: 'macOS may block downloaded programs the first time. The first part of the command clears that block. You will be asked for your Mac password.'
+  },
+  linux: {
+    label: 'Linux',
+    file: 'agent-linux',
+    runIntro: 'Open a terminal in the folder where you saved the file, then run:',
+    command: (key) => `chmod +x ./agent-linux && sudo ./agent-linux --key ${key}`,
+    hint: 'The command makes the file executable and starts it with sudo so it can read network traffic.'
+  }
+};
+
+const detectPlatform = () => {
+  const ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '').toLowerCase();
+  if (ua.includes('windows')) return 'windows';
+  if (ua.includes('mac')) return 'macos';
+  return 'linux';
+};
 
 const maskKey = (key) => {
   if (!key) return '';
@@ -74,6 +113,24 @@ const CopyRow = ({ label, value, copied, onCopy }) => (
   </div>
 );
 
+// Same look as CopyRow, but wraps long terminal commands instead of truncating them.
+const CommandBlock = ({ label, value, copied, onCopy }) => (
+  <div>
+    <span className="text-[11px] font-semibold text-slate-500">{label}</span>
+    <div className="mt-1 flex items-start justify-between gap-3 rounded border border-slate-800 bg-slate-950 px-3 py-2.5">
+      <code className="min-w-0 flex-1 break-all text-xs font-mono leading-relaxed text-emerald-300 select-all">{value}</code>
+      <button
+        type="button"
+        onClick={onCopy}
+        className="mt-0.5 shrink-0 text-slate-500 transition-colors hover:text-emerald-400"
+        aria-label={`Copy ${label}`}
+      >
+        {copied ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
+      </button>
+    </div>
+  </div>
+);
+
 const SetupWizard = ({ onComplete }) => {
   // Values created at login time
   const tenantKey = sessionStorage.getItem('soc_tenant_key') || 'soc_live_default_key';
@@ -83,6 +140,7 @@ const SetupWizard = ({ onComplete }) => {
   // Step 1: dashboard link
   const [linkStatus, setLinkStatus] = useState('idle'); // idle | checking | ok | failed
   const [linkError, setLinkError] = useState(null);
+  const [linkBlocked, setLinkBlocked] = useState(false); // request never got a response (adblocker / shield / offline)
   const [streamStatus, setStreamStatus] = useState('unknown'); // unknown | live | unavailable
 
   // Step 2: OpenRouter connection
@@ -92,10 +150,15 @@ const SetupWizard = ({ onComplete }) => {
   const [useManualKey, setUseManualKey] = useState(!provisionedKey);
   const [manualKey, setManualKey] = useState('');
 
+  // Step 3: sensor deployment (optional)
+  const [sensorPlatform, setSensorPlatform] = useState(detectPlatform);
+
   const [copiedField, setCopiedField] = useState(null);
   const [isFinishing, setIsFinishing] = useState(false);
   const finishTimer = useRef(null);
   const copyTimer = useRef(null);
+  const autoLinkStarted = useRef(false);
+  const autoVerifyStarted = useRef(false);
 
   useEffect(() => () => {
     clearTimeout(finishTimer.current);
@@ -103,17 +166,23 @@ const SetupWizard = ({ onComplete }) => {
   }, []);
 
   // --- AUTO EXECUTION HOOKS ---
+  // Each runs exactly once, so retyping a key or clicking "Use a different key"
+  // can never trigger a surprise background verification.
   useEffect(() => {
-    if (linkStatus === 'idle') {
-      handleEstablishLink();
-    }
-  }, [linkStatus]);
+    if (autoLinkStarted.current) return;
+    autoLinkStarted.current = true;
+    handleEstablishLink();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
-    if (linkStatus === 'ok' && orStatus === 'idle') {
+    if (linkStatus !== 'ok' || autoVerifyStarted.current) return;
+    autoVerifyStarted.current = true;
+    if (provisionedKey) {
       handleVerifyOpenRouter();
     }
-  }, [linkStatus, orStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkStatus]);
 
   const copyText = (value, field) => {
     try {
@@ -129,6 +198,7 @@ const SetupWizard = ({ onComplete }) => {
   const handleEstablishLink = async () => {
     setLinkStatus('checking');
     setLinkError(null);
+    setLinkBlocked(false);
     setStreamStatus('unknown');
 
     try {
@@ -138,11 +208,15 @@ const SetupWizard = ({ onComplete }) => {
       });
     } catch (err) {
       setLinkStatus('failed');
-      setLinkError(
-        err.code === 'ECONNABORTED'
-          ? 'The backend took too long to respond. It may be waking up — wait a few seconds and try again.'
-          : 'Could not reach the CyberCube backend. Check your connection and try again.'
-      );
+      if (err.code === 'ECONNABORTED') {
+        setLinkError('The backend took too long to respond. It may be waking up — wait a few seconds and try again.');
+      } else if (!err.response) {
+        // The request never produced an HTTP response. Browsers report an adblocker or shield
+        // block (ERR_BLOCKED_BY_CLIENT) exactly like any other network error.
+        setLinkBlocked(true);
+      } else {
+        setLinkError('The CyberCube backend responded with an error. Wait a moment and try again.');
+      }
       return;
     }
 
@@ -214,6 +288,10 @@ const SetupWizard = ({ onComplete }) => {
     }, 1500);
   };
 
+  const platform = SENSOR_PLATFORMS[sensorPlatform];
+  const sensorDownloadUrl = `${AGENT_RELEASE_BASE}/${platform.file}`;
+  const sensorCommand = platform.command(tenantKey);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
       <div className="relative w-full max-w-3xl max-h-[92vh] rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl flex flex-col overflow-hidden">
@@ -226,7 +304,7 @@ const SetupWizard = ({ onComplete }) => {
             </div>
             <div>
               <h2 className="text-xl font-bold text-slate-100 tracking-tight">Connect Your Workspace</h2>
-              <p className="text-xs text-slate-400 font-mono mt-1">Link the dashboard and verify your OpenRouter connection</p>
+              <p className="text-xs text-slate-400 font-mono mt-1">Link the dashboard, verify OpenRouter, and deploy your sensor</p>
             </div>
           </div>
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-xs font-semibold">
@@ -277,7 +355,21 @@ const SetupWizard = ({ onComplete }) => {
                   />
                 </div>
 
-                {linkStatus === 'failed' && (
+                {linkStatus === 'failed' && linkBlocked && (
+                  <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-950/20 p-3 text-xs text-amber-300">
+                    <ShieldOff className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                    <div>
+                      <p className="font-semibold">
+                        Your browser's adblocker or shield is blocking the connection to the SOC backend. Please disable it for this site and try again.
+                      </p>
+                      <p className="mt-1 text-amber-300/80">
+                        Already disabled it? The server may still be waking up, so wait a few seconds before retrying.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {linkStatus === 'failed' && !linkBlocked && linkError && (
                   <div className="mt-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-950/30 p-3 text-xs text-rose-300">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
                     <span>{linkError}</span>
@@ -427,6 +519,79 @@ const SetupWizard = ({ onComplete }) => {
                 {!linkOk && (
                   <p className="mt-2 text-[11px] text-slate-500">Link your dashboard in step 1 first.</p>
                 )}
+              </div>
+            </div>
+          </section>
+
+          {/* Step 3: Deploy security sensor (optional, does not block Finish setup) */}
+          <section className="rounded-xl border border-slate-800 bg-slate-950/40 p-5">
+            <div className="flex items-start gap-4">
+              <StepNumber n={3} done={false} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Terminal className="h-4 w-4 text-emerald-400" />
+                  <h3 className="text-sm font-semibold text-slate-200">Deploy your security sensor</h3>
+                  <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-400">
+                    Optional, you can do this later
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-slate-400 leading-relaxed">
+                  The sensor is a ready-to-run program. Download it, paste one command, and it starts sending live traffic to your private workspace. Nothing to install and no configuration files.
+                </p>
+
+                {/* Platform tabs */}
+                <div role="tablist" aria-label="Operating system" className="mt-4 inline-flex rounded-lg border border-slate-800 bg-slate-950 p-1">
+                  {Object.entries(SENSOR_PLATFORMS).map(([id, p]) => {
+                    const selected = sensorPlatform === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        role="tab"
+                        aria-selected={selected}
+                        onClick={() => setSensorPlatform(id)}
+                        className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-colors ${
+                          selected
+                            ? 'bg-slate-800 text-emerald-400 shadow shadow-slate-950/50'
+                            : 'text-slate-500 hover:text-slate-300'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 flex flex-col gap-4" role="tabpanel">
+                  <div>
+                    <span className="text-[11px] font-semibold text-slate-500">A. Download the sensor</span>
+                    <div className="mt-1">
+                      <a
+                        href={sensorDownloadUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-emerald-400 transition-colors hover:bg-slate-700"
+                      >
+                        <Download className="h-4 w-4" />
+                        <span>Download {platform.file}</span>
+                      </a>
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-[11px] font-semibold text-slate-500">B. Run it with your workspace key</p>
+                    <p className="mt-1 text-xs text-slate-400">{platform.runIntro}</p>
+                    <div className="mt-2">
+                      <CommandBlock
+                        label={`${platform.label} command`}
+                        value={sensorCommand}
+                        copied={copiedField === 'sensor-command'}
+                        onCopy={() => copyText(sensorCommand, 'sensor-command')}
+                      />
+                    </div>
+                    <p className="mt-2 text-[11px] leading-relaxed text-slate-500">{platform.hint}</p>
+                  </div>
+                </div>
               </div>
             </div>
           </section>

@@ -39,11 +39,16 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
     clearSessionKeys();
 
     try {
-      // 1. Exchange the Google ID token with the backend to authenticate / provision the tenant.
-      //    The free backend host can take a while to wake up, so the timeout is generous.
+      // Exchange the Google ID token with the backend. The backend authenticates the user,
+      // provisions their tenant and (best effort) generates their OpenRouter key in one call.
+      // Users who already finished setup keep their existing key, so we ask the backend not to rotate it.
+      // The free backend host can take a while to wake up, so the timeout is generous.
       const res = await axios.post(
         `${BACKEND_URL}/auth/google`,
-        { token: credentialResponse.credential },
+        {
+          token: credentialResponse.credential,
+          provision_openrouter: !isSetupComplete()
+        },
         { timeout: 60000 }
       );
 
@@ -56,30 +61,16 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
       sessionStorage.setItem('soc_user_email', res.data.email);
       sessionStorage.setItem('soc_user_name', res.data.name || 'Security Operator');
 
-      const isNewUser = res.data.is_first_login || false;
-
-      // 2. Ask the backend to generate this user's OpenRouter key.
-      //    The management key never leaves the server; we only receive the user's own $0-capped key.
-      //    Users who already finished setup keep their existing key, so we skip re-provisioning.
-      if (!isSetupComplete()) {
-        setStatusText('Provisioning your AI workspace...');
-        try {
-          const keyRes = await axios.post(
-            `${BACKEND_URL}/openrouter/provision`,
-            {},
-            {
-              headers: { Authorization: `Bearer ${res.data.access_token}` },
-              timeout: 30000
-            }
-          );
-          if (keyRes.data && keyRes.data.api_key) {
-            sessionStorage.setItem('soc_openrouter_key', keyRes.data.api_key);
-          }
-        } catch (keyErr) {
-          // Not fatal: the setup wizard lets the user paste their own OpenRouter key instead.
-          console.warn('OpenRouter key provisioning failed:', keyErr?.response?.data?.detail || keyErr.message);
-        }
+      // openrouter_key is null whenever auto-provisioning was skipped or failed server-side.
+      // That is never an error: the user is logged in regardless, and the setup wizard
+      // falls back to letting them paste their own key.
+      if (typeof res.data.openrouter_key === 'string' && res.data.openrouter_key) {
+        sessionStorage.setItem('soc_openrouter_key', res.data.openrouter_key);
+      } else {
+        sessionStorage.removeItem('soc_openrouter_key');
       }
+
+      const isNewUser = res.data.is_first_login || false;
 
       onLoginSuccess({
         apiKey: res.data.api_key,
@@ -95,9 +86,11 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
       if (err.code === 'ECONNABORTED') {
         message = 'The backend took too long to respond. It may be waking up. Wait a few seconds and try again.';
       } else if (err.response?.data?.detail) {
-        message = err.response.data.detail;
+        message = typeof err.response.data.detail === 'string'
+          ? err.response.data.detail
+          : message;
       } else if (!err.response) {
-        message = 'Could not reach the CyberCube backend. Check your connection and try again.';
+        message = "Could not reach the CyberCube backend. If you use an adblocker or browser shield, disable it for this site, then try again.";
       }
       setErrorMsg(message);
     } finally {

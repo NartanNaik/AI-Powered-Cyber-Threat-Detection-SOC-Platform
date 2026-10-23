@@ -1,0 +1,54 @@
+name: Compile Security Agents
+
+on:
+  workflow_dispatch: # This allows you to trigger the build manually
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            file_name: agent
+            final_name: agent-linux
+          - os: windows-latest
+            file_name: agent.exe
+            final_name: agent.exe
+          - os: macos-latest
+            file_name: agent
+            final_name: agent-macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        cd sensor
+        python -m pip install --upgrade pip
+        pip install pyinstaller scapy python-dotenv requests
+        
+    - name: Compile Agent
+      run: |
+        cd sensor
+        pyinstaller --onefile agent.py
+        
+    - name: Rename Mac/Linux file
+      if: matrix.os != 'windows-latest'
+      run: |
+        cd sensor/dist
+        mv agent ${{ matrix.final_name }}
+        
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.final_name }}
+        path: sensor/dist/${{ matrix.final_name }}

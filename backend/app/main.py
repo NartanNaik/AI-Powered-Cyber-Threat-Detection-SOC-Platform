@@ -72,6 +72,11 @@ SESSION_TTL_SECONDS = 12 * 60 * 60
 # Optional: when set, tenant keys are derived with HMAC so they cannot be computed from an email alone.
 # NOTE: enabling this changes every existing user's tenant key.
 TENANT_KEY_SECRET = os.getenv("TENANT_KEY_SECRET", "").strip()
+if not TENANT_KEY_SECRET:
+    logger.warning(
+        "TENANT_KEY_SECRET is not set; tenant keys are derived from a plain SHA-256 of the email "
+        "and can be computed by anyone who knows that email."
+    )
 
 OPENROUTER_API = "https://openrouter.ai/api/v1"
 
@@ -300,10 +305,13 @@ def revoke_openrouter_key(key_hash: str) -> None:
 
 class GoogleAuthRequest(BaseModel):
     token: str
+    # The frontend sets this to false for users who already finished setup, so their
+    # existing key is not rotated on every login.
+    provision_openrouter: bool = True
 
 @app.post("/auth/google")
 def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
-    """Verifies Google OAuth token, provisions a unique tenant workspace, and Auto-Generates OpenRouter Key."""
+    """Verifies Google OAuth token, provisions a unique tenant workspace, and auto-generates an OpenRouter key."""
     if not GOOGLE_CLIENT_ID:
         logger.error("GOOGLE_CLIENT_ID is not configured; refusing to accept Google sign-ins.")
         raise HTTPException(status_code=503, detail="Google sign-in is not configured on the server.")
@@ -333,29 +341,47 @@ def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
     existing_threats = db.query(Threat).filter(Threat.api_key == tenant_api_key).first()
     is_first_login = True if not existing_threats else False
 
-    # --- AUTO-PROVISION OPENROUTER KEY ---
-    # We do this silently so a failure here doesn't crash the entire login flow
+    # --- AUTO-PROVISION OPENROUTER KEY (fail-soft) ---
+    # Provisioning is a convenience, never a gate: ANY failure here (missing management key,
+    # OpenRouter outage, timeout, database error) is logged and login still succeeds with
+    # openrouter_key = null. The setup wizard then lets the user paste their own key.
     or_api_key = None
-    try:
-        record = db.query(OpenRouterKeyRecord).filter(OpenRouterKeyRecord.email == email).first()
-        old_hash = record.key_hash if record else None
+    if request.provision_openrouter:
+        try:
+            record = db.query(OpenRouterKeyRecord).filter(OpenRouterKeyRecord.email == email).first()
+            old_hash = record.key_hash if record else None
 
-        # Generate new $0-capped key for this session
-        new_key, new_hash = create_openrouter_user_key(email)
-        or_api_key = new_key
+            # Generate a new $0-capped key
+            new_key, new_hash = create_openrouter_user_key(email)
 
-        if record:
-            record.key_hash = new_hash
-            record.created_at = datetime.utcnow()
-        else:
-            db.add(OpenRouterKeyRecord(email=email, key_hash=new_hash))
-        db.commit()
+            try:
+                if record:
+                    record.key_hash = new_hash
+                    record.created_at = datetime.utcnow()
+                else:
+                    db.add(OpenRouterKeyRecord(email=email, key_hash=new_hash))
+                db.commit()
+            except Exception:
+                # Keep the session usable and don't leave an untracked live key behind.
+                db.rollback()
+                revoke_openrouter_key(new_hash)
+                raise
 
-        # Clean up old keys automatically
-        if old_hash:
-            revoke_openrouter_key(old_hash)
-    except Exception as e:
-        logger.warning(f"Auto-provisioning OpenRouter key failed for {email}: {e}")
+            or_api_key = new_key
+
+            # Clean up the previous key automatically
+            if old_hash:
+                revoke_openrouter_key(old_hash)
+        except HTTPException as e:
+            logger.warning("OpenRouter auto-provisioning skipped for %s: %s", email, e.detail)
+            or_api_key = None
+        except Exception as e:
+            logger.warning("OpenRouter auto-provisioning failed for %s: %s", email, e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            or_api_key = None
 
     return {
         "api_key": tenant_api_key,
@@ -363,7 +389,7 @@ def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
         "email": email,
         "name": name,
         "is_first_login": is_first_login,
-        "openrouter_key": or_api_key  # Passing this securely to frontend to bypass SetupWizard manual entry
+        "openrouter_key": or_api_key  # null when provisioning was skipped or failed
     }
 
 @app.post("/auth/generate-key")
@@ -391,12 +417,17 @@ def provision_openrouter_key(
 
     new_key, new_hash = create_openrouter_user_key(email)
 
-    if record:
-        record.key_hash = new_hash
-        record.created_at = datetime.utcnow()
-    else:
-        db.add(OpenRouterKeyRecord(email=email, key_hash=new_hash))
-    db.commit()
+    try:
+        if record:
+            record.key_hash = new_hash
+            record.created_at = datetime.utcnow()
+        else:
+            db.add(OpenRouterKeyRecord(email=email, key_hash=new_hash))
+        db.commit()
+    except Exception:
+        db.rollback()
+        revoke_openrouter_key(new_hash)
+        raise HTTPException(status_code=500, detail="Could not save the new OpenRouter key record.")
 
     if old_hash:
         revoke_openrouter_key(old_hash)
