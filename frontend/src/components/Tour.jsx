@@ -25,7 +25,8 @@ function layoutFor(rect) {
   return { style, placement: below ? 'below' : 'above', tailX };
 }
 
-export default function Tour({ steps, onClose, onStepChange }) {
+// FIX: `steps` now defaults to [] so the component can never crash on steps[0]
+export default function Tour({ steps = [], onClose, onStepChange }) {
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState(null);
   const [, setSize] = useState(0);

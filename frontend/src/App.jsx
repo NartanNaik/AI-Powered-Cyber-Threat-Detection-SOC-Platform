@@ -31,6 +31,27 @@ const BACKEND_HOST = 'ai-cyber-threat-backend-k0pz.onrender.com';
 // Tour "already seen" flag is stored per user so each new account gets the walkthrough once.
 const getTourKey = () => `soc_tour_seen:${sessionStorage.getItem('soc_user_email') || 'anonymous'}`;
 
+// Lazily resolves a [data-tour="..."] element so the Tour can follow it.
+const tourRef = (name) => ({
+  get current() {
+    return document.querySelector(`[data-tour="${name}"]`);
+  },
+});
+
+// Steps for the guided tour (Tour.jsx requires this array via the `steps` prop).
+const TOUR_STEPS = [
+  { id: 'status',    title: 'System Status',     text: 'Shows that the live monitor is running and connected.',      ref: tourRef('system-status') },
+  { id: 'clock',     title: 'Clock',             text: 'Current local time and date for incident timestamps.',       ref: tourRef('clock') },
+  { id: 'overview',  title: 'Overview',          text: 'Your live SOC dashboard with threat summary and map.',       ref: tourRef('nav-overview') },
+  { id: 'alerts',    title: 'Alerts',            text: 'Investigate and filter classified network threats.',         ref: tourRef('nav-alerts') },
+  { id: 'logs',      title: 'Logs',              text: 'Full audit log of benign and anomalous flows.',              ref: tourRef('nav-logs') },
+  { id: 'analytics', title: 'Analytics',         text: 'Historical intrusion trends over time.',                     ref: tourRef('nav-analytics') },
+  { id: 'models',    title: 'Models (AI)',       text: 'Classifier metrics, confusion matrix and benchmarks.',       ref: tourRef('nav-models') },
+  { id: 'settings',  title: 'Settings',          text: 'IPS auto-containment, thresholds and API URL.',              ref: tourRef('nav-settings') },
+  { id: 'reset',     title: 'Reset Statistics',  text: 'Restarts the live data stream and refreshes the pages.',     ref: tourRef('reset-stats') },
+  { id: 'guide',     title: 'Setup Guide',       text: 'Replay this tour any time from here.',                       ref: tourRef('setup-guide') },
+];
+
 // Inline SVGs for brand icons to bypass Lucide's removal of trademarked logos
 const GithubIcon = ({ className }) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -117,6 +138,11 @@ function App() {
   const closeTour = useCallback(() => {
     setIsTourOpen(false);
     try { localStorage.setItem(getTourKey(), '1'); } catch (e) { /* storage unavailable */ }
+  }, []);
+
+  // When a tour step targets a sidebar item, make sure the sidebar is expanded.
+  const handleTourStepChange = useCallback(() => {
+    setIsSidebarOpen(true);
   }, []);
 
   // WebSocket Live Push Telemetry (re-runs when the user restarts the stream)
@@ -230,8 +256,10 @@ function App() {
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden text-slate-100 font-sans relative">
 
-      {/* Guided tour */}
-      <Tour isOpen={isTourOpen} onClose={closeTour} onComplete={closeTour} />
+      {/* Guided tour (FIX: only mounted while open, and always given its steps) */}
+      {isTourOpen && (
+        <Tour steps={TOUR_STEPS} onClose={closeTour} onStepChange={handleTourStepChange} />
+      )}
 
       {/* Collapsible Sidebar */}
       <aside className={`relative bg-slate-900 border-r border-slate-800 flex flex-col justify-between shrink-0 transition-all duration-300 ease-in-out z-20 ${isSidebarOpen ? 'w-64' : 'w-20'}`}>
