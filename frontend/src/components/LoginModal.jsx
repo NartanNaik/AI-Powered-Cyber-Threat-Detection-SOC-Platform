@@ -6,7 +6,8 @@ import {
   AlertCircle, 
   Terminal, 
   Lock, 
-  KeyRound
+  KeyRound,
+  ShieldAlert
 } from 'lucide-react';
 import { CyberCubeLogo } from './SplashScreen';
 import { isSetupComplete } from '../utils/setupState';
@@ -35,14 +36,9 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
     setErrorMsg(null);
     setStatusText('Authenticating Security Credentials...');
 
-    // Never let a previous user's keys leak into this session.
     clearSessionKeys();
 
     try {
-      // Exchange the Google ID token with the backend. The backend authenticates the user,
-      // provisions their tenant and (best effort) generates their OpenRouter key in one call.
-      // Users who already finished setup keep their existing key, so we ask the backend not to rotate it.
-      // The free backend host can take a while to wake up, so the timeout is generous.
       const res = await axios.post(
         `${BACKEND_URL}/auth/google`,
         {
@@ -61,9 +57,6 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
       sessionStorage.setItem('soc_user_email', res.data.email);
       sessionStorage.setItem('soc_user_name', res.data.name || 'Security Operator');
 
-      // openrouter_key is null whenever auto-provisioning was skipped or failed server-side.
-      // That is never an error: the user is logged in regardless, and the setup wizard
-      // falls back to letting them paste their own key.
       if (typeof res.data.openrouter_key === 'string' && res.data.openrouter_key) {
         sessionStorage.setItem('soc_openrouter_key', res.data.openrouter_key);
       } else {
@@ -144,8 +137,16 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
           </div>
         )}
 
+        {/* Browser Shield / Adblocker Warning */}
+        <div className="mt-6 flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 p-3 text-xs text-amber-300">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+          <p className="leading-relaxed">
+            <strong>Using Brave or an Adblocker?</strong> Google Sign-In requires third-party pop-up access. Please disable your Shields or Adblocker for this site before logging in.
+          </p>
+        </div>
+
         {/* Google Authentication Section */}
-        <div className="mt-6 flex flex-col items-center justify-center">
+        <div className="mt-4 flex flex-col items-center justify-center">
           {isVerifying ? (
             <div className="flex items-center gap-2.5 py-3 text-xs font-semibold text-emerald-400 font-mono">
               <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent"></span>
@@ -154,15 +155,15 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
           ) : (
             <div className="w-full flex justify-center py-1">
               <GoogleLogin
-  onSuccess={handleGoogleSuccess}
-  onError={handleGoogleFailure}
-  theme="filled_black"
-  shape="rectangular"
-  size="large"
-  width="340"
-  text="signin_with"
-  use_fedcm_for_prompt={true} 
-/>
+                onSuccess={handleGoogleSuccess}
+                onError={handleGoogleFailure}
+                theme="filled_black"
+                shape="rectangular"
+                size="large"
+                width="340"
+                text="signin_with"
+                use_fedcm_for_prompt={false} 
+              />
             </div>
           )}
         </div>
