@@ -845,6 +845,10 @@ def get_containment_rules(
         "snort_rule": f'drop ip {ip} any -> any any (msg:"SOC Auto-Containment IP {ip}"; sid:200{id:04d}; rev:1;)'
     }
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "message": "CyberCube backend is live"}
+
 # 14. POST /pcap/upload - PCAP ingestion with Tenant Binding & IPS Auto-Containment
 @app.post("/pcap/upload")
 async def upload_pcap(
