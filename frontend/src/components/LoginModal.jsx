@@ -154,14 +154,15 @@ const LoginModal = ({ isOpen, onLoginSuccess }) => {
           ) : (
             <div className="w-full flex justify-center py-1">
               <GoogleLogin
-                onSuccess={handleGoogleSuccess}
-                onError={handleGoogleFailure}
-                theme="filled_black"
-                shape="rectangular"
-                size="large"
-                width="340"
-                text="signin_with"
-              />
+  onSuccess={handleGoogleSuccess}
+  onError={handleGoogleFailure}
+  theme="filled_black"
+  shape="rectangular"
+  size="large"
+  width="340"
+  text="signin_with"
+  use_fedcm_for_prompt={true} 
+/>
             </div>
           )}
         </div>
