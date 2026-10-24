@@ -19,9 +19,7 @@ import { markSetupComplete } from '../utils/setupState';
 
 const BACKEND_URL = 'https://ai-cyber-threat-backend-k0pz.onrender.com';
 
-// TODO: replace "yourusername" with your GitHub account and make sure each release
-// asset below is uploaded under exactly this file name.
-const AGENT_RELEASE_BASE = 'https://github.com/yourusername/cybercube-agent/releases/latest/download';
+const AGENT_RELEASE_BASE = 'https://github.com/NartanNaik/Project-Releases/releases/download/cybercube-v1.0.0';
 
 const SENSOR_PLATFORMS = {
   windows: {
